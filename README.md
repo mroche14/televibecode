@@ -29,16 +29,35 @@ Telegram Bot ↔ Orchestrator MCP ↔ Sessions / Repos / Tasks / Claude Code + S
 - **Remote Control**: Run instructions, view logs, approve actions via Telegram
 - **Approval Gating**: Require approval for sensitive operations (push, deploy)
 
-## File Layout
+## Installation & Usage
+
+```bash
+# Install TeleVibeCode
+uv tool install televibecode
+# or: pip install televibecode
+
+# Run the server, pointed at your projects directory
+televibecode serve --root ~/projects
+
+# Or with explicit config
+televibecode serve --root ~/projects --config ~/projects/.televibe/config.yaml
+```
+
+## Projects Root Layout
+
+TeleVibeCode manages a **projects root** directory. It stores its state in `.televibe/`:
 
 ```
-/projects/
-├── orchestrator/           # This project
-├── repos/                  # Git repositories
-│   ├── project-a/
-│   └── project-b/
-└── workspaces/            # Git worktrees for sessions
-    └── project-a/S12/feature-x/
+~/projects/                     # Your projects root
+├── .televibe/                  # TeleVibeCode runtime state
+│   ├── state.db               # SQLite database
+│   ├── config.yaml            # Configuration
+│   └── logs/                  # Execution logs
+├── repos/                      # Your git repositories
+│   ├── my-web-app/
+│   └── my-api/
+└── workspaces/                 # Git worktrees for sessions
+    └── my-web-app/S12/feature-auth/
 ```
 
 ## Telegram Commands
@@ -78,14 +97,19 @@ Telegram Bot ↔ Orchestrator MCP ↔ Sessions / Repos / Tasks / Claude Code + S
 ## Development
 
 ```bash
-# Install dependencies
+# Clone and install dependencies
+git clone https://github.com/mroche14/televibecode
+cd televibecode
 uv sync
 
-# Run the orchestrator
-uv run televibecode
+# Run in development mode
+uv run televibecode serve --root /path/to/test/projects
 
 # Run tests
 uv run pytest
+
+# Lint
+uv run ruff check .
 ```
 
 ## License

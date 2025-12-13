@@ -398,7 +398,7 @@ backup:
     6. Upload to remote storage (optional)
 
   storage:
-    local_path: "/projects/orchestrator/backups"
+    local_path: "<root>/.televibe/backups"
     remote: "s3://bucket/televibe/backups"  # Optional
 
   naming: "state-{timestamp}.db.gz"
@@ -475,19 +475,19 @@ recovery:
 ```yaml
 logging:
   orchestrator_logs:
-    path: "/projects/orchestrator/logs/orchestrator.log"
+    path: "<root>/.televibe/logs/orchestrator.log"
     rotation: "daily"
     retention_days: 30
     max_size_mb: 100
 
   job_logs:
-    path: "/projects/orchestrator/logs/jobs/{job_id}.log"
+    path: "<root>/.televibe/logs/jobs/{job_id}.log"
     retention_days: 7
     max_size_mb: 100
     on_exceed: "truncate"
 
   audit_logs:
-    path: "/projects/orchestrator/logs/audit.log"
+    path: "<root>/.televibe/logs/audit.log"
     retention_days: 90
     events:
       - "session.created"
@@ -515,7 +515,7 @@ runbook:
     2. Check process:
        command: "ps aux | grep claude"
     3. Check logs:
-       command: "tail -100 /projects/orchestrator/logs/jobs/{job_id}.log"
+       command: "tail -100 <root>/.televibe/logs/jobs/{job_id}.log"
 
   resolution:
     if_process_hung:
@@ -556,8 +556,8 @@ runbook:
       1. Restore from backup (see recovery procedure)
 
     if_disk_full:
-      1. Clear old logs: "find /projects/orchestrator/logs -mtime +7 -delete"
-      2. Clear old backups: "find /projects/orchestrator/backups -mtime +30 -delete"
+      1. Clear old logs: "find <root>/.televibe/logs -mtime +7 -delete"
+      2. Clear old backups: "find <root>/.televibe/backups -mtime +30 -delete"
       3. Remove stale worktrees: "git worktree prune" in each repo
 
     if_permission_denied:

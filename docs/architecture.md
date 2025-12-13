@@ -15,7 +15,7 @@ Telegram Bot ↔ Orchestrator MCP ↔ Sessions / Repos / Tasks / Claude Code + S
 The Orchestrator is:
 - The **source of truth** for projects, sessions, tasks, and jobs
 - The **only API surface** that Telegram (and other clients) interact with
-- **Runs from the projects folder**, owning all repositories and workspaces
+- **Installed separately**, pointed at a projects root directory at runtime
 
 ## Layer Architecture
 
@@ -98,28 +98,55 @@ Harness sends prompts like:
 /sc:analyze Review current branch vs main, comment on risks, do not change code.
 ```
 
-## File System Layout
+## Deployment Model
+
+TeleVibeCode is a **server/tool** installed separately from the projects it manages.
+
+### Installation
+
+```bash
+# Install TeleVibeCode (the tool)
+uv tool install televibecode
+# or: pip install televibecode
+
+# Run it, pointed at your projects directory
+televibecode serve --root ~/projects
+```
+
+### Projects Root Layout
+
+The `--root` directory is where your repositories live. TeleVibeCode creates a `.televibe/` folder for its runtime state:
 
 ```
-/projects/
-├── orchestrator/           # Orchestrator MCP code + state DB
-│   ├── src/
-│   ├── state.db           # SQLite: projects, sessions, tasks, jobs
-│   └── config.yaml
-├── repos/                  # Git repositories (bare or working)
-│   ├── project-a/
+~/projects/                     # Your projects root (--root)
+├── .televibe/                  # TeleVibeCode runtime artifacts
+│   ├── state.db               # SQLite: projects, sessions, tasks, jobs
+│   ├── config.yaml            # Server configuration
+│   └── logs/                  # Job execution logs
+│       └── jobs/
+├── repos/                      # Your git repositories
+│   ├── my-web-app/
 │   │   ├── .git/
-│   │   └── backlog/       # Backlog.md tasks
-│   ├── project-b/
-│   └── project-c/
-└── workspaces/            # Git worktrees for active sessions
-    ├── project-a/
+│   │   └── backlog/           # Backlog.md tasks
+│   ├── my-api/
+│   └── my-library/
+└── workspaces/                 # Git worktrees for active sessions
+    ├── my-web-app/
     │   └── S12/
-    │       └── feature-x/  # Worktree for session S12
-    └── project-b/
+    │       └── feature-auth/   # Worktree for session S12
+    └── my-api/
         └── S7/
-            └── refactor-api/
+            └── refactor-endpoints/
 ```
+
+### Key Separation
+
+| Concern | Location |
+|---------|----------|
+| TeleVibeCode code | Installed via pip/uv (e.g., `~/.local/bin/televibecode`) |
+| TeleVibeCode state | `<projects-root>/.televibe/` |
+| User repositories | `<projects-root>/repos/` |
+| Session workspaces | `<projects-root>/workspaces/` |
 
 ## Message Tagging Convention
 

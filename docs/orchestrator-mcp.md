@@ -2,7 +2,11 @@
 
 ## Overview
 
-The Orchestrator MCP is the central brain of TeleVibeCode. It runs as an MCP server from the `/projects` folder and provides tools for managing projects, sessions, tasks, and jobs.
+The Orchestrator MCP is the central brain of TeleVibeCode. It's installed as a Python package and runs as a server pointed at a **projects root** directory containing user repositories.
+
+```bash
+televibecode serve --root ~/projects
+```
 
 ## Server Configuration
 
@@ -23,18 +27,21 @@ The Orchestrator MCP is the central brain of TeleVibeCode. It runs as an MCP ser
 
 ### Configuration (config.yaml)
 
+Located at `<projects-root>/.televibe/config.yaml`:
+
 ```yaml
 # Orchestrator configuration
 server:
   host: "127.0.0.1"
   port: 3100
 
+# Paths are relative to projects_root (set via --root CLI arg)
+# These defaults are auto-configured, override only if needed
 paths:
-  projects_root: "/projects"
-  repos_root: "/projects/repos"
-  workspaces_root: "/projects/workspaces"
-  state_db: "/projects/orchestrator/state.db"
-  logs_dir: "/projects/orchestrator/logs"
+  repos_dir: "repos"              # <root>/repos/
+  workspaces_dir: "workspaces"    # <root>/workspaces/
+  state_db: ".televibe/state.db"  # <root>/.televibe/state.db
+  logs_dir: ".televibe/logs"      # <root>/.televibe/logs/
 
 defaults:
   superclaude_profile: "default"
@@ -404,7 +411,7 @@ Get job execution logs.
 ```json
 {
   "job_id": "...",
-  "log_path": "/projects/orchestrator/logs/job-xxx.log",
+  "log_path": "<root>/.televibe/logs/job-xxx.log",
   "content": "...",
   "truncated": false
 }
@@ -565,7 +572,7 @@ async def run_job(job: Job, session: Session):
     )
 
     # 5. Stream and capture logs
-    log_path = f"/projects/orchestrator/logs/{job.job_id}.log"
+    log_path = f"<root>/.televibe/logs/{job.job_id}.log"
     async with aiofiles.open(log_path, "w") as log:
         async for line in process.stdout:
             await log.write(line.decode())
