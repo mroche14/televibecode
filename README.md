@@ -97,8 +97,9 @@ uv tool install televibecode
 cat > ~/projects/.env << 'EOF'
 TELEGRAM_BOT_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TELEGRAM_ALLOWED_CHAT_IDS=YOUR_CHAT_ID_HERE
-AGNO_PROVIDER=gemini
-AGNO_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# AI providers (set one or both)
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxx
+GEMINI_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 EOF
 
 # Run (points at your existing projects folder)
@@ -168,12 +169,12 @@ TeleVibeCode creates a `.televibe/` folder in your projects root. Your repositor
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | **Recommended** | Comma-separated chat IDs (see Security) |
-| `AGNO_API_KEY` | No* | API key for intent classification |
-| `AGNO_PROVIDER` | No | `gemini`, `anthropic`, `openai`, `openrouter` |
+| `OPENROUTER_API_KEY` | No* | OpenRouter API key (access to many free models) |
+| `GEMINI_API_KEY` | No* | Google Gemini API key |
 | `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MAX_CONCURRENT_JOBS` | No | Default: 3 |
 
-*Intent classification falls back to pattern matching if no API key is set.
+*Set at least one AI provider key for natural language support. Use `/models` in Telegram to see available models and `/model <id>` to switch.
 
 ### Security
 

@@ -28,6 +28,9 @@ class ChatSession:
         default_factory=lambda: datetime.now(timezone.utc)
     )
     notification_level: str = "normal"  # "silent", "normal", "verbose"
+    # AI model preference
+    ai_model_id: str | None = None  # e.g., "meta-llama/llama-3.2-3b-instruct:free"
+    ai_provider: str | None = None  # "openrouter" or "gemini"
 
 
 class MessageContextStore:
@@ -216,6 +219,33 @@ class ChatStateManager:
         if chat_id in self._chats:
             del self._chats[chat_id]
         self._message_contexts.clear_chat(chat_id)
+
+    def set_ai_model(
+        self, chat_id: int, model_id: str, provider: str
+    ) -> None:
+        """Set AI model preference for a chat.
+
+        Args:
+            chat_id: Telegram chat ID.
+            model_id: Model ID (e.g., "meta-llama/llama-3.2-3b-instruct:free").
+            provider: Provider name ("openrouter" or "gemini").
+        """
+        chat = self.get_chat(chat_id)
+        chat.ai_model_id = model_id
+        chat.ai_provider = provider
+        chat.last_interaction = datetime.now(timezone.utc)
+
+    def get_ai_model(self, chat_id: int) -> tuple[str | None, str | None]:
+        """Get AI model preference for a chat.
+
+        Args:
+            chat_id: Telegram chat ID.
+
+        Returns:
+            Tuple of (model_id, provider) or (None, None) if not set.
+        """
+        chat = self.get_chat(chat_id)
+        return chat.ai_model_id, chat.ai_provider
 
     # Message context methods (delegate to MessageContextStore)
 

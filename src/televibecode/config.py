@@ -39,19 +39,30 @@ class Settings(BaseSettings):
         # Parse comma-separated string: "123,456,789"
         return [int(x.strip()) for x in str(v).split(",") if x.strip()]
 
-    # AI Layer (Agno) - optional for AI-based intent classification
-    agno_api_key: str | None = Field(
+    # AI Provider API Keys (set whichever you have)
+    gemini_api_key: str | None = Field(
         default=None,
-        description="API key for LLM provider (optional)",
+        description="Google Gemini API key",
     )
-    agno_provider: Literal["gemini", "anthropic", "openai", "openrouter"] = Field(
-        default="gemini",
-        description="LLM provider for intermediate AI layer",
-    )
-    agno_model: str | None = Field(
+    openrouter_api_key: str | None = Field(
         default=None,
-        description="Model ID override (uses provider default if not set)",
+        description="OpenRouter API key (access to many free models)",
     )
+
+    @property
+    def has_gemini(self) -> bool:
+        """Check if Gemini is available."""
+        return bool(self.gemini_api_key)
+
+    @property
+    def has_openrouter(self) -> bool:
+        """Check if OpenRouter is available."""
+        return bool(self.openrouter_api_key)
+
+    @property
+    def has_ai(self) -> bool:
+        """Check if any AI provider is available."""
+        return self.has_gemini or self.has_openrouter
 
     # Paths
     televibe_root: Path = Field(
@@ -155,21 +166,19 @@ def _print_missing_config_help(error: Exception) -> None:
         print("  3. Copy the token and set it in your environment")
         print()
 
-    if "agno_api_key" in error_str.lower():
-        print("Missing required environment variable: AGNO_API_KEY")
-        print("Set AGNO_PROVIDER and AGNO_API_KEY for the AI layer.")
-        print()
-        print("Free options:")
-        print("  - Gemini: https://aistudio.google.com/apikey")
-        print("  - OpenRouter: https://openrouter.ai (free models: grok-beta)")
-        print()
-
     print("Example .env file:")
     print("-" * 40)
     print("TELEGRAM_BOT_TOKEN=your_token_here")
-    print("AGNO_PROVIDER=gemini")
-    print("AGNO_API_KEY=your_api_key_here")
+    print("TELEGRAM_ALLOWED_CHAT_IDS=your_chat_id")
+    print()
+    print("# AI providers (set one or both)")
+    print("GEMINI_API_KEY=your_gemini_key")
+    print("OPENROUTER_API_KEY=your_openrouter_key")
     print("-" * 40)
+    print()
+    print("Get API keys:")
+    print("  - Gemini: https://aistudio.google.com/apikey")
+    print("  - OpenRouter: https://openrouter.ai/keys")
     print()
 
     # Print the actual validation error for debugging

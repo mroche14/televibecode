@@ -25,6 +25,9 @@ from televibecode.telegram.handlers import (
     handle_reply_message,
     help_command,
     jobs_command,
+    model_callback_handler,
+    model_command,
+    models_command,
     natural_language_handler,
     new_session_command,
     next_tasks_command,
@@ -160,6 +163,8 @@ class TeleVibeBot:
             BotCommand("tail", "View job logs"),
             BotCommand("cancel", "Cancel a job"),
             BotCommand("approvals", "List pending approvals"),
+            BotCommand("models", "List available AI models"),
+            BotCommand("model", "Switch AI model"),
         ]
         await self.app.bot.set_my_commands(commands)
         log.info("bot_commands_menu_set", count=len(commands))
@@ -212,6 +217,10 @@ class TeleVibeBot:
             CommandHandler("approvals", approvals_command, filters=auth)
         )
 
+        # Model commands
+        self.app.add_handler(CommandHandler("models", models_command, filters=auth))
+        self.app.add_handler(CommandHandler("model", model_command, filters=auth))
+
         # Callback query handlers (for inline keyboards)
         # Note: CallbackQueryHandler checks auth in the handler itself
         self.app.add_handler(
@@ -230,6 +239,12 @@ class TeleVibeBot:
             CallbackQueryHandler(
                 self._auth_callback_wrapper(approval_callback_handler),
                 pattern="^approval:",
+            )
+        )
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(model_callback_handler),
+                pattern="^model:",
             )
         )
 

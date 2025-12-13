@@ -5,6 +5,7 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from televibecode.ai import IntentType, classify_message
+from televibecode.ai.models import ModelRegistry, Provider
 from televibecode.config import Settings
 from televibecode.db import (
     Database,
@@ -48,6 +49,9 @@ __all__ = [
     "approvals_command",
     "approval_callback_handler",
     "natural_language_handler",
+    "models_command",
+    "model_command",
+    "model_callback_handler",
 ]
 
 
@@ -232,6 +236,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 *Reply Routing*
 Reply to any bot message to send instructions to that session's context.
+
+*AI Models*
+/models - List available AI models (ranked)
+/model <id> - Switch to a specific model
 
 *Help*
 /help - Show this message
@@ -2203,3 +2211,205 @@ async def _run_as_instruction(
 
     except ValueError as e:
         await update.message.reply_text(f"Error: {e}")
+
+
+# =============================================================================
+# Model Management Commands
+# =============================================================================
+
+
+async def models_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /models command - list available AI models."""
+    settings = get_settings(context)
+    chat_state = get_chat_state(context)
+    chat_id = update.effective_chat.id
+
+    if not settings.has_ai:
+        await update.message.reply_text(
+            "No AI providers configured.\n\n"
+            "Add GEMINI_API_KEY or OPENROUTER_API_KEY to your .env file."
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    # Get available models
+    models = await ModelRegistry.get_all_available_models(
+        openrouter_key=settings.openrouter_api_key,
+        gemini_key=settings.gemini_api_key,
+        free_only=True,
+    )
+
+    if not models:
+        await update.message.reply_text("No free models available.")
+        return
+
+    # Get current model
+    current_model_id, current_provider = chat_state.get_ai_model(chat_id)
+
+    # Build message with top models
+    text = "*Available AI Models* (ranked by quality)\n\n"
+
+    # Show current model
+    if current_model_id:
+        text += f"Current: `{current_model_id}`\n\n"
+    else:
+        text += "Current: _auto (best available)_\n\n"
+
+    # Show top 15 models with inline buttons
+    top_models = models[:15]
+
+    # Group by provider
+    openrouter_models = [m for m in top_models if m.provider == Provider.OPENROUTER]
+    gemini_models = [m for m in top_models if m.provider == Provider.GEMINI]
+
+    if gemini_models:
+        text += "*Gemini*\n"
+        for i, m in enumerate(gemini_models[:5], 1):
+            current = " ✓" if m.id == current_model_id else ""
+            text += f"{i}. `{m.id}`{current}\n"
+        text += "\n"
+
+    if openrouter_models:
+        text += "*OpenRouter* (free)\n"
+        for i, m in enumerate(openrouter_models[:10], 1):
+            current = " ✓" if m.id == current_model_id else ""
+            # Show score for context
+            score = f"[{m.rank_score:.2f}]" if m.rank_score > 0 else ""
+            text += f"{i}. `{m.id}` {score}{current}\n"
+
+    text += "\nUse /model <id> to switch models."
+
+    # Create inline keyboard for quick selection
+    keyboard = []
+    row = []
+
+    for m in top_models[:8]:
+        short_name = m.name[:15] if len(m.name) > 15 else m.name
+        callback_data = f"model:select:{m.provider.value}:{m.id}"
+
+        # Telegram has 64 byte limit for callback_data
+        if len(callback_data) > 64:
+            # Use index-based selection for long IDs
+            continue
+
+        row.append(InlineKeyboardButton(short_name, callback_data=callback_data))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    # Add refresh button
+    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="model:refresh")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await update.message.reply_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+
+async def model_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /model command - set AI model."""
+    chat_state = get_chat_state(context)
+    settings = get_settings(context)
+    chat_id = update.effective_chat.id
+
+    if not settings.has_ai:
+        await update.message.reply_text(
+            "No AI providers configured.\n\n"
+            "Add GEMINI_API_KEY or OPENROUTER_API_KEY to your .env file."
+        )
+        return
+
+    # Parse args
+    args = context.args
+    if not args:
+        # Show current model
+        model_id, provider = chat_state.get_ai_model(chat_id)
+        if model_id:
+            await update.message.reply_text(
+                f"Current model: `{model_id}` ({provider})\n\n"
+                f"Use /models to see available options.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "No model selected (using auto).\n\n"
+                "Use /models to see available options."
+            )
+        return
+
+    model_id = args[0]
+
+    # Try to find the model
+    model = await ModelRegistry.find_model(model_id, settings.openrouter_api_key)
+
+    if not model:
+        await update.message.reply_text(
+            f"Model `{model_id}` not found.\n\n"
+            f"Use /models to see available options.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Set the model
+    chat_state.set_ai_model(chat_id, model.id, model.provider.value)
+
+    await update.message.reply_text(
+        f"Model set to `{model.id}`\n"
+        f"Provider: {model.provider.value}\n"
+        f"Context: {model.context_length:,} tokens",
+        parse_mode="Markdown",
+    )
+
+
+async def model_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle model selection callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    chat_state = get_chat_state(context)
+    settings = get_settings(context)
+    chat_id = query.message.chat.id
+
+    data = query.data
+    parts = data.split(":", 3)  # model:action:provider:model_id
+
+    if len(parts) < 2:
+        return
+
+    action = parts[1]
+
+    if action == "refresh":
+        # Fetch fresh models
+        models = await ModelRegistry.get_all_available_models(
+            openrouter_key=settings.openrouter_api_key,
+            gemini_key=settings.gemini_api_key,
+            free_only=True,
+        )
+
+        await query.edit_message_text(
+            f"Refreshed! Found {len(models)} free models.\n\n"
+            f"Use /models to see the updated list."
+        )
+        return
+
+    if action == "select" and len(parts) >= 4:
+        provider = parts[2]
+        model_id = parts[3]
+
+        # Set the model
+        chat_state.set_ai_model(chat_id, model_id, provider)
+
+        await query.edit_message_text(
+            f"Model switched to `{model_id}`",
+            parse_mode="Markdown",
+        )
