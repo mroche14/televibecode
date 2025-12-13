@@ -2380,17 +2380,45 @@ def _build_models_page(
     return text, InlineKeyboardMarkup(keyboard_rows)
 
 
+def _get_provider_sort_key(model_id: str) -> tuple[int, str]:
+    """Get sort key for grouping by provider.
+
+    Returns (priority, provider_name) for sorting.
+    """
+    model_lower = model_id.lower()
+    # Priority order for providers
+    if "grok" in model_lower or "x-ai" in model_lower:
+        return (0, "grok")
+    if "gemini" in model_lower or model_lower.startswith("gemini"):
+        return (1, "gemini")
+    if "gpt" in model_lower or "openai" in model_lower:
+        return (2, "openai")
+    if "claude" in model_lower or "anthropic" in model_lower:
+        return (3, "anthropic")
+    if "llama" in model_lower or "meta" in model_lower:
+        return (4, "llama")
+    if "deepseek" in model_lower:
+        return (5, "deepseek")
+    if "mistral" in model_lower:
+        return (6, "mistral")
+    if "qwen" in model_lower:
+        return (7, "qwen")
+    if "gemma" in model_lower:
+        return (8, "gemma")
+    return (99, "other")
+
+
 async def _get_filtered_models(
     settings: Settings, filter_type: str
 ) -> list:
-    """Get models with filter applied.
+    """Get models with filter applied, grouped by provider.
 
     Args:
         settings: Application settings.
         filter_type: Filter type (all, free, gem, or).
 
     Returns:
-        Filtered list of ModelInfo.
+        Filtered list of ModelInfo, sorted by provider then rank.
     """
     models = await ModelRegistry.get_all_available_models(
         openrouter_key=settings.openrouter_api_key,
@@ -2404,6 +2432,12 @@ async def _get_filtered_models(
         models = [m for m in models if m.provider.value == "openrouter"]
     elif filter_type == "free":
         models = [m for m in models if m.is_free]
+
+    # Sort by provider group, then by rank within group
+    models.sort(key=lambda m: (
+        _get_provider_sort_key(m.id)[0],
+        -m.rank_score  # Higher score first within provider
+    ))
 
     return models
 
