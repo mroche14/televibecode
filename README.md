@@ -47,6 +47,55 @@ televibecode serve --root ~/projects
 televibecode serve --root ~/projects --config ~/projects/.televibe/config.yaml
 ```
 
+## Configuration
+
+### Required Environment Variables
+
+```bash
+# Telegram Bot Token (required)
+# Create a bot via @BotFather on Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+
+# AI API Key for intermediate intelligence layer (required)
+# Used for natural language parsing and intent detection
+AGNO_API_KEY=your_api_key_here
+AGNO_PROVIDER=gemini  # gemini | anthropic | openai | openrouter
+```
+
+### Free API Options
+
+**Gemini (Recommended)**
+- Free API key at: https://aistudio.google.com/apikey
+- Generous free tier (15 RPM for Gemini 1.5 Flash)
+- Set `AGNO_PROVIDER=gemini`
+
+**OpenRouter**
+- Sign up at: https://openrouter.ai
+- Free models: `grok-beta`, `mistral-7b-instruct`
+- Set `AGNO_PROVIDER=openrouter` and `AGNO_MODEL=grok-beta`
+
+### Example .env
+
+```bash
+TELEGRAM_BOT_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AGNO_PROVIDER=gemini
+AGNO_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### Startup Checks
+
+If required variables are missing, the server will prompt or exit with helpful messages:
+
+```
+Missing required environment variable: TELEGRAM_BOT_TOKEN
+Get your token from @BotFather on Telegram.
+
+Missing required environment variable: AGNO_API_KEY
+Set AGNO_PROVIDER and AGNO_API_KEY. Free option: Gemini at https://aistudio.google.com/apikey
+```
+
+**Load order**: `.env` file in `--root` directory → environment variables → CLI flags
+
 ## Projects Root Layout
 
 Point TeleVibeCode at your **existing projects folder**. No restructuring needed:
@@ -97,6 +146,8 @@ Point TeleVibeCode at your **existing projects folder**. No restructuring needed
 
 ### Planning
 - [Implementation Roadmap](docs/roadmap.md) - Phased development plan
+- [Implementation Workflow](docs/workflow.md) - Step-by-step task breakdown
+- [Technology Reference](docs/technology-reference.md) - Implementation patterns for all dependencies
 
 ## Development
 
