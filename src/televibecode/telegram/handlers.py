@@ -2,6 +2,7 @@
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from televibecode.ai import IntentType, classify_message, transcribe_telegram_voice
@@ -760,11 +761,16 @@ async def session_callback_handler(
             message_type="session",
         )
 
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-        )
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+        except BadRequest as e:
+            # Ignore "Message is not modified" error (user clicked same button)
+            if "not modified" not in str(e).lower():
+                raise
 
     elif action == "status":
         # Show status of active session
@@ -829,11 +835,16 @@ async def session_callback_handler(
         text = format_session_list(sessions_list, "Active Sessions")
         text += "\n\n_Tap a session to switch to it._"
 
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=keyboard,
-        )
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+        except BadRequest as e:
+            # Ignore "Message is not modified" error (nothing changed)
+            if "not modified" not in str(e).lower():
+                raise
 
 
 # =============================================================================
@@ -2615,9 +2626,14 @@ async def model_callback_handler(
             models, page=0, filter_type=filter_type,
             current_model_id=current_model_id, max_score=max_score
         )
-        await query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=keyboard
-        )
+        try:
+            await query.edit_message_text(
+                text, parse_mode="Markdown", reply_markup=keyboard
+            )
+        except BadRequest as e:
+            # Ignore "Message is not modified" error (nothing changed)
+            if "not modified" not in str(e).lower():
+                raise
         return
 
     # Handle page navigation: m:p:PAGE:FILTER
