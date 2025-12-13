@@ -2352,8 +2352,9 @@ def _build_models_page(
             short_id = current_model_id
         text += f"\n📍 `{short_id}`"
 
-    # Build button list (1 per row)
+    # Build button list (1 per row, left-aligned with padding)
     keyboard_rows = []
+    button_width = 30  # Fixed width for consistent alignment
 
     for i, m in enumerate(page_models):
         global_idx = start_idx + i
@@ -2364,6 +2365,11 @@ def _build_models_page(
         parts = m.id.replace(":free", "").split("/")
         short_name = parts[-1] if len(parts) > 1 else parts[0]
         label = f"{icon} {short_name}{selected}"
+
+        # Pad with spaces to push text left (workaround for centered buttons)
+        padding = button_width - len(label)
+        if padding > 0:
+            label = label + " " * padding
 
         # Callback: m:s:INDEX (select by index)
         callback = f"m:s:{global_idx}"
