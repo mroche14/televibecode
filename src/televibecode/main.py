@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import logging
 import signal
 import sys
 from pathlib import Path
@@ -17,6 +18,12 @@ from televibecode.telegram import create_bot
 
 def configure_logging(level: str) -> None:
     """Configure structlog for the application."""
+    # Configure stdlib logging
+    logging.basicConfig(
+        format="%(message)s",
+        level=getattr(logging, level.upper(), logging.INFO),
+    )
+
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -31,12 +38,9 @@ def configure_logging(level: str) -> None:
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-
-
-log = structlog.get_logger()
 
 
 async def serve(root: Path) -> None:
@@ -50,6 +54,7 @@ async def serve(root: Path) -> None:
     settings.ensure_dirs()
 
     configure_logging(settings.log_level)
+    log = structlog.get_logger()
 
     log.info(
         "televibecode_starting",
