@@ -45,19 +45,19 @@ televibecode serve --root ~/projects --config ~/projects/.televibe/config.yaml
 
 ## Projects Root Layout
 
-TeleVibeCode manages a **projects root** directory. It stores its state in `.televibe/`:
+Point TeleVibeCode at your **existing projects folder**. No restructuring needed:
 
 ```
-~/projects/                     # Your projects root
-├── .televibe/                  # TeleVibeCode runtime state
-│   ├── state.db               # SQLite database
-│   ├── config.yaml            # Configuration
-│   └── logs/                  # Execution logs
-├── repos/                      # Your git repositories
-│   ├── my-web-app/
-│   └── my-api/
-└── workspaces/                 # Git worktrees for sessions
-    └── my-web-app/S12/feature-auth/
+~/projects/                     # Your existing projects folder
+├── .televibe/                  # TeleVibeCode artifacts (auto-created)
+│   ├── state.db
+│   ├── config.yaml
+│   ├── logs/
+│   └── workspaces/             # Session worktrees
+│       └── my-web-app/S12/feature-auth/
+├── my-web-app/                 # Your repos stay where they are
+├── my-api/
+└── my-library/
 ```
 
 ## Telegram Commands

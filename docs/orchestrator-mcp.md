@@ -35,13 +35,13 @@ server:
   host: "127.0.0.1"
   port: 3100
 
-# Paths are relative to projects_root (set via --root CLI arg)
-# These defaults are auto-configured, override only if needed
+# All paths relative to projects_root (set via --root CLI arg)
+# Everything goes in .televibe/ - these defaults rarely need changing
 paths:
-  repos_dir: "repos"              # <root>/repos/
-  workspaces_dir: "workspaces"    # <root>/workspaces/
-  state_db: ".televibe/state.db"  # <root>/.televibe/state.db
-  logs_dir: ".televibe/logs"      # <root>/.televibe/logs/
+  televibe_dir: ".televibe"                   # <root>/.televibe/
+  workspaces_dir: ".televibe/workspaces"      # <root>/.televibe/workspaces/
+  state_db: ".televibe/state.db"              # <root>/.televibe/state.db
+  logs_dir: ".televibe/logs"                  # <root>/.televibe/logs/
 
 defaults:
   superclaude_profile: "default"
@@ -82,7 +82,7 @@ List all registered projects.
     {
       "project_id": "project-a",
       "name": "Project A",
-      "path": "/projects/repos/project-a",
+      "path": "~/projects/project-a",
       "default_branch": "main",
       "backlog_enabled": true,
       "active_sessions": 2
@@ -106,11 +106,11 @@ Get details for a specific project.
   "project": {
     "project_id": "project-a",
     "name": "Project A",
-    "path": "/projects/repos/project-a",
+    "path": "~/projects/project-a",
     "remote_url": "git@github.com:user/project-a.git",
     "default_branch": "main",
     "backlog_enabled": true,
-    "backlog_path": "/projects/repos/project-a/backlog"
+    "backlog_path": "~/projects/project-a/backlog"
   }
 }
 ```
@@ -200,7 +200,7 @@ Create a new session with git worktree.
   "session": {
     "session_id": "S15",
     "project_id": "project-a",
-    "workspace_path": "/projects/workspaces/project-a/S15/feature-x",
+    "workspace_path": "<root>/.televibe/workspaces/project-a/S15/feature-x",
     "branch": "feature-x",
     "state": "idle"
   },

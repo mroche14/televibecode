@@ -22,7 +22,7 @@ Represents a git repository managed by the orchestrator.
 |-------|------|-------------|
 | `project_id` | string | Unique identifier (slug) |
 | `name` | string | Display name |
-| `path` | string | Absolute path to repo (e.g., `/projects/repos/project-a`) |
+| `path` | string | Absolute path to repo (e.g., `~/projects/my-web-app`) |
 | `remote_url` | string? | Git remote URL |
 | `default_branch` | string | Default branch (main/master) |
 | `backlog_enabled` | boolean | Whether Backlog.md is initialized |

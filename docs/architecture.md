@@ -60,8 +60,8 @@ Middle AI Layer (optional)                          │
     ▼                                               │
 Orchestrator MCP ◄──────────────────────────────────┘
     │
-    ├─► Project Registry (repos/)
-    ├─► Session Registry (workspaces/)
+    ├─► Project Registry (scans for git repos)
+    ├─► Session Registry (.televibe/workspaces/)
     ├─► Task Store (Backlog.md per repo)
     └─► Job Queue
             │
@@ -115,38 +115,34 @@ televibecode serve --root ~/projects
 
 ### Projects Root Layout
 
-The `--root` directory is where your repositories live. TeleVibeCode creates a `.televibe/` folder for its runtime state:
+Point TeleVibeCode at your existing projects folder. It creates a single `.televibe/` folder for all its artifacts:
 
 ```
-~/projects/                     # Your projects root (--root)
-├── .televibe/                  # TeleVibeCode runtime artifacts
+~/projects/                     # Your existing projects folder (--root)
+├── .televibe/                  # ALL TeleVibeCode artifacts (auto-created)
 │   ├── state.db               # SQLite: projects, sessions, tasks, jobs
 │   ├── config.yaml            # Server configuration
-│   └── logs/                  # Job execution logs
-│       └── jobs/
-├── repos/                      # Your git repositories
-│   ├── my-web-app/
-│   │   ├── .git/
-│   │   └── backlog/           # Backlog.md tasks
-│   ├── my-api/
-│   └── my-library/
-└── workspaces/                 # Git worktrees for active sessions
-    ├── my-web-app/
-    │   └── S12/
-    │       └── feature-auth/   # Worktree for session S12
-    └── my-api/
-        └── S7/
-            └── refactor-endpoints/
+│   ├── logs/                  # Job execution logs
+│   └── workspaces/            # Git worktrees for active sessions
+│       ├── my-web-app/
+│       │   └── S12/
+│       │       └── feature-auth/
+│       └── my-api/
+│           └── S7/
+│               └── refactor-endpoints/
+├── my-web-app/                 # Your repos stay exactly where they are
+│   ├── .git/
+│   └── backlog/               # Backlog.md tasks (optional)
+├── my-api/
+└── my-library/
 ```
 
-### Key Separation
+### Key Points
 
-| Concern | Location |
-|---------|----------|
-| TeleVibeCode code | Installed via pip/uv (e.g., `~/.local/bin/televibecode`) |
-| TeleVibeCode state | `<projects-root>/.televibe/` |
-| User repositories | `<projects-root>/repos/` |
-| Session workspaces | `<projects-root>/workspaces/` |
+- **No restructuring needed** - your repos stay where they are
+- **Single hidden folder** - everything TeleVibeCode creates goes in `.televibe/`
+- **Auto-discovery** - scans for git repos on startup
+- **Easy cleanup** - delete `.televibe/` to remove all TeleVibeCode state
 
 ## Message Tagging Convention
 

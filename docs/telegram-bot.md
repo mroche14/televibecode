@@ -58,13 +58,13 @@ List all registered projects.
 📂 Projects:
 
 1. project-a (2 active sessions)
-   /projects/repos/project-a
+   ~/projects/project-a
 
 2. project-b (0 active sessions)
-   /projects/repos/project-b
+   ~/projects/project-b
 
 3. project-c (1 active session)
-   /projects/repos/project-c
+   ~/projects/project-c
 ```
 
 #### `/project <name>`
@@ -76,7 +76,7 @@ Get project details.
 ```
 📂 project-a
 
-Path: /projects/repos/project-a
+Path: ~/projects/project-a
 Remote: git@github.com:user/project-a.git
 Default branch: main
 Backlog: ✅ enabled (15 tasks)
@@ -125,7 +125,7 @@ Create a new session.
 ✅ Session created
 
 🔹 S16 📂 project-a 🌿 feature-payments
-Workspace: /projects/workspaces/project-a/S16/feature-payments
+Workspace: <root>/.televibe/workspaces/project-a/S16/feature-payments
 
 Ready for instructions. Reply to this message or use:
 /run S16 <instruction>
@@ -154,7 +154,7 @@ Close a session.
 ```
 ✅ Session S12 closed
 
-Worktree removed: /projects/workspaces/project-a/S12/feature-x
+Worktree removed: <root>/.televibe/workspaces/project-a/S12/feature-x
 Branch preserved: feature-x
 ```
 
