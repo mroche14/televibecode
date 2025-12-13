@@ -4,7 +4,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
-from televibecode.ai import IntentType, classify_message
+from televibecode.ai import IntentType, classify_message, transcribe_telegram_voice
 from televibecode.ai.models import ModelRegistry
 from televibecode.config import Settings
 from televibecode.db import (
@@ -49,6 +49,7 @@ __all__ = [
     "approvals_command",
     "approval_callback_handler",
     "natural_language_handler",
+    "voice_message_handler",
     "models_command",
     "model_command",
     "model_callback_handler",
@@ -2659,4 +2660,112 @@ async def model_callback_handler(
             f"Context: {model.context_length:,} tokens\n"
             f"Free: {'Yes' if model.is_free else 'No'}",
             parse_mode="Markdown",
+        )
+
+
+# =============================================================================
+# Voice Message Handler (Audio Transcription)
+# =============================================================================
+
+
+async def voice_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle voice messages by transcribing and processing as text.
+
+    Uses Groq Whisper API to transcribe voice messages, then processes
+    the transcribed text through the natural language handler.
+    """
+    settings: Settings = context.bot_data["settings"]
+    chat_id = update.effective_chat.id
+
+    # Check if Groq is configured
+    if not settings.has_groq:
+        await update.message.reply_text(
+            "🎤 Voice messages require Groq API.\n\n"
+            "Add `GROQ_API_KEY` to your `.env` file.\n"
+            "Get a free key at: https://console.groq.com/keys",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Show typing indicator
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    try:
+        # Get voice message file
+        voice = update.message.voice or update.message.audio
+        if not voice:
+            await update.message.reply_text("No voice message found.")
+            return
+
+        # Download the voice file
+        file = await context.bot.get_file(voice.file_id)
+        voice_bytes = await file.download_as_bytearray()
+
+        # Transcribe using Groq Whisper
+        transcribed_text = await transcribe_telegram_voice(
+            voice_file=bytes(voice_bytes),
+            api_key=settings.groq_api_key,
+        )
+
+        if not transcribed_text or not transcribed_text.strip():
+            await update.message.reply_text(
+                "🎤 Couldn't understand the audio. Please try again."
+            )
+            return
+
+        # Show what was transcribed
+        await update.message.reply_text(
+            f"🎤 *Transcribed:*\n_{transcribed_text}_",
+            parse_mode="Markdown",
+        )
+
+        # Now process as if user sent this text
+        # Create a fake text message to reuse natural_language_handler logic
+        chat_state = get_chat_state(context)
+
+        # Classify the intent
+        model = _get_agno_model(settings)
+        result = await classify_message(transcribed_text, model=model)
+
+        # Handle based on intent (same logic as natural_language_handler)
+        if result.intent == IntentType.UNKNOWN:
+            active_session = chat_state.get_active_session(chat_id)
+            if active_session:
+                await _run_as_instruction(
+                    update, context, active_session, transcribed_text
+                )
+            else:
+                await update.message.reply_text(
+                    "I understood: " + transcribed_text + "\n\n"
+                    "Use /help to see commands, or /use to select a session."
+                )
+            return
+
+        # Route known intents to their handlers
+        if result.intent == IntentType.HELP:
+            await help_command(update, context)
+        elif result.intent == IntentType.LIST_PROJECTS:
+            await projects_command(update, context)
+        elif result.intent == IntentType.LIST_SESSIONS:
+            await sessions_command(update, context)
+        elif result.intent == IntentType.SESSION_STATUS:
+            await status_command(update, context)
+        elif result.intent == IntentType.LIST_TASKS:
+            await tasks_command(update, context)
+        elif result.intent == IntentType.LIST_APPROVALS:
+            await approvals_command(update, context)
+        else:
+            # For other intents, show the suggested command
+            if result.suggested_command:
+                await update.message.reply_text(
+                    f"Try: `{result.suggested_command}`",
+                    parse_mode="Markdown",
+                )
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"🎤 Transcription error: {e}\n\n"
+            "Please try again or send as text."
         )

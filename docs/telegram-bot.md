@@ -390,6 +390,39 @@ The Middle AI layer can parse natural language:
 | "show me all sessions" | `list_sessions()` |
 | "start working on T-125" | `claim_task("T-125", active_session) + run_instruction(...)` |
 
+### Voice Messages (Audio Transcription)
+
+Send voice messages or audio files to control the bot hands-free. Voice messages are automatically transcribed using Groq's Whisper API.
+
+**Requirements:**
+- `GROQ_API_KEY` environment variable set
+- Get a free key at: https://console.groq.com/keys
+
+**Flow:**
+```
+1. User sends voice message 🎤
+2. Bot downloads audio from Telegram (OGG format)
+3. Bot sends to Groq Whisper for transcription
+4. Bot shows transcribed text
+5. Bot processes as natural language (same as text)
+```
+
+**Example:**
+```
+User: 🎤 (voice message: "show me all sessions")
+
+Bot: 🎤 Transcribed:
+     "show me all sessions"
+
+Bot: 🔹 Active Sessions:
+     S12 - project-a/feature-x (idle)
+     S15 - project-b/bugfix (running)
+```
+
+**Supported formats:** OGG, MP3, WAV, M4A, WebM (up to 25MB)
+
+**Model:** `whisper-large-v3-turbo` (fastest, high quality)
+
 ---
 
 ## Bot State

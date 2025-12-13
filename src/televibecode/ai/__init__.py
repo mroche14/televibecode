@@ -7,6 +7,10 @@ from televibecode.ai.intent import (
     classify_message,
     get_classifier,
 )
+from televibecode.ai.transcription import (
+    transcribe_audio,
+    transcribe_telegram_voice,
+)
 
 __all__ = [
     "IntentClassifier",
@@ -14,4 +18,6 @@ __all__ = [
     "ParsedIntent",
     "classify_message",
     "get_classifier",
+    "transcribe_audio",
+    "transcribe_telegram_voice",
 ]

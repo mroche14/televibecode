@@ -104,6 +104,18 @@ async def serve(root: Path) -> None:
             "Set GEMINI_API_KEY or OPENROUTER_API_KEY.",
         )
 
+    # Log Groq (audio transcription) status
+    if settings.has_groq:
+        log.info(
+            "groq_configured",
+            message="Voice transcription enabled (Groq Whisper)",
+        )
+    else:
+        log.info(
+            "groq_not_configured",
+            message="Voice messages disabled. Set GROQ_API_KEY for transcription.",
+        )
+
     # Initialize database
     log.info("database_connecting", path=str(settings.db_path))
     db = Database(settings.db_path)

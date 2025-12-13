@@ -44,6 +44,7 @@ from televibecode.telegram.handlers import (
     task_callback_handler,
     tasks_command,
     use_session_command,
+    voice_message_handler,
 )
 from televibecode.telegram.state import ChatStateManager
 
@@ -253,6 +254,14 @@ class TeleVibeBot:
             MessageHandler(
                 auth & filters.TEXT & ~filters.COMMAND & ~filters.REPLY,
                 natural_language_handler,
+            )
+        )
+
+        # Voice message handler (transcription via Groq Whisper)
+        self.app.add_handler(
+            MessageHandler(
+                auth & (filters.VOICE | filters.AUDIO),
+                voice_message_handler,
             )
         )
 

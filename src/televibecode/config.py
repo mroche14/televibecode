@@ -48,6 +48,10 @@ class Settings(BaseSettings):
         default=None,
         description="OpenRouter API key (access to many free models)",
     )
+    groq_api_key: str | None = Field(
+        default=None,
+        description="Groq API key (for Whisper audio transcription)",
+    )
 
     @property
     def has_gemini(self) -> bool:
@@ -58,6 +62,11 @@ class Settings(BaseSettings):
     def has_openrouter(self) -> bool:
         """Check if OpenRouter is available."""
         return bool(self.openrouter_api_key)
+
+    @property
+    def has_groq(self) -> bool:
+        """Check if Groq (audio transcription) is available."""
+        return bool(self.groq_api_key)
 
     @property
     def has_ai(self) -> bool:
@@ -174,11 +183,15 @@ def _print_missing_config_help(error: Exception) -> None:
     print("# AI providers (set one or both)")
     print("GEMINI_API_KEY=your_gemini_key")
     print("OPENROUTER_API_KEY=your_openrouter_key")
+    print()
+    print("# Voice transcription (optional)")
+    print("GROQ_API_KEY=your_groq_key")
     print("-" * 40)
     print()
     print("Get API keys:")
     print("  - Gemini: https://aistudio.google.com/apikey")
     print("  - OpenRouter: https://openrouter.ai/keys")
+    print("  - Groq: https://console.groq.com/keys")
     print()
 
     # Print the actual validation error for debugging
