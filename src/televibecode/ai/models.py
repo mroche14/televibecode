@@ -130,13 +130,26 @@ class ModelRegistry:
             log.warning("openrouter_fetch_failed", error=str(e))
             return cls.DEFAULT_FREE_MODELS
 
+    # Priority providers - these get a significant boost
+    PRIORITY_PROVIDERS = {
+        "x-ai": 100.0,       # Grok
+        "google": 90.0,      # Gemini
+        "openai": 85.0,      # OpenAI
+        "anthropic": 80.0,   # Claude
+        "meta-llama": 50.0,  # Llama (very capable)
+        "deepseek": 45.0,    # DeepSeek (strong reasoning)
+        "mistralai": 40.0,   # Mistral
+        "qwen": 35.0,        # Qwen
+    }
+
     @classmethod
     def _calculate_rank_score(cls, model_id: str, price_map: dict[str, float]) -> float:
         """Calculate rank score for a model.
 
-        Uses two strategies:
-        1. Price of paid sibling (higher = better quality)
-        2. Parameter count from model name (70b > 7b)
+        Uses three strategies:
+        1. Priority provider boost (Grok, Gemini, OpenAI, Claude first)
+        2. Price of paid sibling (higher = better quality)
+        3. Parameter count from model name (70b > 7b)
 
         Args:
             model_id: The model ID.
@@ -145,17 +158,28 @@ class ModelRegistry:
         Returns:
             Rank score (higher = better).
         """
-        # Strategy 1: Find paid sibling price
+        score = 0.0
+
+        # Strategy 1: Priority provider boost
+        model_lower = model_id.lower()
+        for provider, boost in cls.PRIORITY_PROVIDERS.items():
+            if provider in model_lower or model_lower.startswith(f"{provider}/"):
+                score += boost
+                break
+
+        # Strategy 2: Find paid sibling price
         clean_id = model_id.replace(":free", "")
         shadow_value = price_map.get(clean_id, 0)
+        score += shadow_value
 
-        # Strategy 2: Parameter count heuristic
-        if shadow_value == 0:
-            match = re.search(r"(\d+)b", model_id.lower())
-            if match:
-                shadow_value = int(match.group(1)) / 100
+        # Strategy 3: Parameter count heuristic
+        match = re.search(r"(\d+)b", model_id.lower())
+        if match:
+            param_count = int(match.group(1))
+            # Scale: 70b = 0.7, 405b = 4.05
+            score += param_count / 100
 
-        return shadow_value
+        return score
 
     @classmethod
     async def get_free_models(

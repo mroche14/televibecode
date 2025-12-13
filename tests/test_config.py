@@ -21,18 +21,19 @@ class TestSettings:
             "GEMINI_API_KEY": "",
             "OPENROUTER_API_KEY": "",
         }
-        with patch.dict(os.environ, clean_env, clear=False):
-            # Also need to change dir to avoid loading .env
-            with tempfile.TemporaryDirectory() as tmpdir:
-                original_cwd = os.getcwd()
-                try:
-                    os.chdir(tmpdir)
-                    settings = Settings()
-                    assert settings.telegram_bot_token == "test-token"
-                    assert settings.log_level == "INFO"
-                    assert settings.max_concurrent_jobs == 3
-                finally:
-                    os.chdir(original_cwd)
+        with (
+            patch.dict(os.environ, clean_env, clear=False),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                settings = Settings()
+                assert settings.telegram_bot_token == "test-token"
+                assert settings.log_level == "INFO"
+                assert settings.max_concurrent_jobs == 3
+            finally:
+                os.chdir(original_cwd)
 
     def test_custom_values(self):
         """Test custom configuration values."""

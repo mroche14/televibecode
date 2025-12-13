@@ -56,23 +56,66 @@ async def serve(root: Path) -> None:
     configure_logging(settings.log_level)
     log = structlog.get_logger()
 
+    # Startup banner
+    print()
+    print("=" * 60)
+    print(f"  TeleVibeCode v{__version__}")
+    print("  Remote orchestration for Claude Code via Telegram")
+    print("=" * 60)
+    print()
+
     log.info(
-        "televibecode_starting",
-        version=__version__,
+        "config_loaded",
         root=str(settings.televibe_root),
         db_path=str(settings.db_path),
+        log_level=settings.log_level,
     )
 
+    # Log security status
+    if settings.telegram_allowed_chat_ids:
+        log.info(
+            "security_enabled",
+            allowed_chats=len(settings.telegram_allowed_chat_ids),
+            chat_ids=settings.telegram_allowed_chat_ids,
+        )
+    else:
+        log.warning(
+            "security_disabled",
+            message="TELEGRAM_ALLOWED_CHAT_IDS not set - bot is PUBLIC!",
+        )
+
+    # Log AI provider status
+    ai_providers = []
+    if settings.has_gemini:
+        ai_providers.append("Gemini")
+    if settings.has_openrouter:
+        ai_providers.append("OpenRouter")
+
+    if ai_providers:
+        log.info(
+            "ai_providers_configured",
+            providers=ai_providers,
+            message=f"AI enabled: {', '.join(ai_providers)}",
+        )
+    else:
+        log.warning(
+            "ai_providers_missing",
+            message="No AI providers configured. "
+            "Set GEMINI_API_KEY or OPENROUTER_API_KEY.",
+        )
+
     # Initialize database
+    log.info("database_connecting", path=str(settings.db_path))
     db = Database(settings.db_path)
     await db.connect()
-    log.info("database_connected", path=str(settings.db_path))
+    log.info("database_ready", path=str(settings.db_path))
 
-    # Create MCP server (stored for future use in Phase 2+)
+    # Create MCP server
     _ = create_mcp_server(db, settings.televibe_root)
-    log.info("mcp_server_created")
+    log.info("mcp_server_ready")
 
     # Create and start Telegram bot
+    log.info("telegram_bot_initializing")
     bot = create_bot(settings, db)
     await bot.setup()
 
@@ -80,7 +123,7 @@ async def serve(root: Path) -> None:
     shutdown_event = asyncio.Event()
 
     def signal_handler():
-        log.info("shutdown_signal_received")
+        log.info("shutdown_signal_received", message="Ctrl+C pressed, shutting down...")
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
@@ -88,7 +131,6 @@ async def serve(root: Path) -> None:
         loop.add_signal_handler(sig, signal_handler)
 
     # Start bot polling
-    log.info("starting_telegram_bot")
     assert bot.app is not None, "Bot application not initialized"
     await bot.app.initialize()
     await bot.app.start()
@@ -96,10 +138,19 @@ async def serve(root: Path) -> None:
     assert bot.app.updater is not None, "Bot updater not initialized"
     await bot.app.updater.start_polling(drop_pending_updates=True)
 
+    # Ready message
+    print()
     log.info(
-        "televibecode_running",
-        message="TeleVibeCode is running. Press Ctrl+C to stop.",
+        "server_ready",
+        message="TeleVibeCode is running!",
+        telegram_bot="connected",
+        database="connected",
+        ai_providers=ai_providers or ["none"],
     )
+    print()
+    print("  Open Telegram and send /help to your bot to get started.")
+    print("  Press Ctrl+C to stop the server.")
+    print()
 
     # Wait for shutdown signal
     await shutdown_event.wait()
