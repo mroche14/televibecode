@@ -2285,7 +2285,7 @@ def _get_tier_medal(rank: int) -> str:
 
 
 # Models per page for pagination
-MODELS_PER_PAGE = 8
+MODELS_PER_PAGE = 10
 
 
 def _build_models_page(
@@ -2335,35 +2335,22 @@ def _build_models_page(
             short_id = current_model_id
         text += f"\n📍 `{short_id}`"
 
-    # Build button grid (2 per row)
+    # Build button list (1 per row)
     keyboard_rows = []
-    row = []
 
     for i, m in enumerate(page_models):
         global_idx = start_idx + i
         icon = _get_provider_icon(m.id)
-        rank = global_idx + 1
-        medal = _get_tier_medal(rank) if rank <= 3 else f"{rank}."
-        selected = "✓" if m.id == current_model_id else ""
+        selected = " ✓" if m.id == current_model_id else ""
 
-        # Create button with rank + icon + short name
+        # Create button with icon + model name
         parts = m.id.replace(":free", "").split("/")
         short_name = parts[-1] if len(parts) > 1 else parts[0]
-        short_name = short_name[:12]
-        label = f"{medal}{icon}{short_name}{selected}"
+        label = f"{icon} {short_name}{selected}"
 
         # Callback: m:s:INDEX (select by index)
         callback = f"m:s:{global_idx}"
-        row.append(InlineKeyboardButton(label, callback_data=callback))
-
-        # 2 buttons per row
-        if len(row) == 2:
-            keyboard_rows.append(row)
-            row = []
-
-    # Add remaining button if odd number
-    if row:
-        keyboard_rows.append(row)
+        keyboard_rows.append([InlineKeyboardButton(label, callback_data=callback)])
 
     # Navigation row
     nav_row = []
