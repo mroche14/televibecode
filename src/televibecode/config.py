@@ -23,6 +23,21 @@ class Settings(BaseSettings):
         ...,
         description="Telegram bot token from @BotFather",
     )
+    telegram_allowed_chat_ids: list[int] = Field(
+        default_factory=list,
+        description="Allowed Telegram chat IDs (empty = allow all - INSECURE)",
+    )
+
+    @field_validator("telegram_allowed_chat_ids", mode="before")
+    @classmethod
+    def parse_chat_ids(cls, v: str | list[int] | None) -> list[int]:
+        """Parse chat IDs from comma-separated string or list."""
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return v
+        # Parse comma-separated string: "123,456,789"
+        return [int(x.strip()) for x in str(v).split(",") if x.strip()]
 
     # AI Layer (Agno) - optional for AI-based intent classification
     agno_api_key: str | None = Field(

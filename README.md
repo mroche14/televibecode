@@ -96,6 +96,7 @@ uv tool install televibecode
 # Create .env in your projects directory
 cat > ~/projects/.env << 'EOF'
 TELEGRAM_BOT_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TELEGRAM_ALLOWED_CHAT_IDS=YOUR_CHAT_ID_HERE
 AGNO_PROVIDER=gemini
 AGNO_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 EOF
@@ -166,12 +167,38 @@ TeleVibeCode creates a `.televibe/` folder in your projects root. Your repositor
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | **Recommended** | Comma-separated chat IDs (see Security) |
 | `AGNO_API_KEY` | No* | API key for intent classification |
 | `AGNO_PROVIDER` | No | `gemini`, `anthropic`, `openai`, `openrouter` |
 | `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MAX_CONCURRENT_JOBS` | No | Default: 3 |
 
 *Intent classification falls back to pattern matching if no API key is set.
+
+### Security
+
+**Important**: By default, anyone who discovers your bot can use it. This is dangerous since the bot can execute code on your machine.
+
+**Restrict access by chat ID:**
+
+1. Start the bot without `TELEGRAM_ALLOWED_CHAT_IDS` (you'll see a security warning)
+2. Send any message to your bot - it will reply with your chat ID
+3. Add the chat ID to your `.env`:
+
+```bash
+TELEGRAM_ALLOWED_CHAT_IDS=8581681908
+```
+
+For multiple users, use comma-separated IDs:
+```bash
+TELEGRAM_ALLOWED_CHAT_IDS=8581681908,123456789
+```
+
+**Finding your chat ID:**
+- From Telegram Web: The number in the URL (`https://web.telegram.org/a/#8581681908`)
+- From the bot: Send any message when unconfigured - it shows your ID in the error
+
+Unauthorized users see: "Access denied. Your chat ID: `XXXXX`"
 
 ### Load Order
 

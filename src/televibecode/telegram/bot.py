@@ -12,6 +12,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.ext.filters import BaseFilter
 
 from televibecode.config import Settings
 from televibecode.db import Database
@@ -46,6 +47,41 @@ from televibecode.telegram.state import ChatStateManager
 log = structlog.get_logger()
 
 
+class AllowedChatFilter(BaseFilter):
+    """Filter that only allows messages from whitelisted chat IDs."""
+
+    def __init__(self, allowed_chat_ids: list[int]):
+        """Initialize the filter.
+
+        Args:
+            allowed_chat_ids: List of allowed chat IDs. Empty list allows all.
+        """
+        super().__init__()
+        self.allowed_chat_ids = set(allowed_chat_ids)
+
+    def check_update(self, update: Update) -> bool:
+        """Check if the update is from an allowed chat.
+
+        Args:
+            update: Telegram update.
+
+        Returns:
+            True if allowed, False otherwise.
+        """
+        # If no whitelist configured, allow all (but warn on startup)
+        if not self.allowed_chat_ids:
+            return True
+
+        # Get chat ID from various update types
+        chat_id = None
+        if update.effective_chat:
+            chat_id = update.effective_chat.id
+        elif update.callback_query and update.callback_query.message:
+            chat_id = update.callback_query.message.chat.id
+
+        return chat_id in self.allowed_chat_ids
+
+
 class TeleVibeBot:
     """TeleVibeCode Telegram bot."""
 
@@ -64,6 +100,7 @@ class TeleVibeBot:
         self.db = db
         self.state = ChatStateManager()
         self.app: Application | None = None
+        self.auth_filter = AllowedChatFilter(settings.telegram_allowed_chat_ids)
 
     async def setup(self) -> Application:
         """Set up the bot application.
@@ -71,6 +108,19 @@ class TeleVibeBot:
         Returns:
             Configured Application instance.
         """
+        # Security check - warn if no chat IDs configured
+        if not self.settings.telegram_allowed_chat_ids:
+            log.warning(
+                "security_warning",
+                message="No TELEGRAM_ALLOWED_CHAT_IDS configured! "
+                "Bot is accessible to ANYONE. Set allowed chat IDs in .env",
+            )
+        else:
+            log.info(
+                "auth_configured",
+                allowed_chat_ids=self.settings.telegram_allowed_chat_ids,
+            )
+
         # Build application
         self.app = Application.builder().token(self.settings.telegram_bot_token).build()
 
@@ -78,6 +128,7 @@ class TeleVibeBot:
         self.app.bot_data["db"] = self.db
         self.app.bot_data["settings"] = self.settings
         self.app.bot_data["chat_state"] = self.state
+        self.app.bot_data["auth_filter"] = self.auth_filter
 
         # Register handlers
         self._register_handlers()
@@ -115,61 +166,69 @@ class TeleVibeBot:
 
     def _register_handlers(self) -> None:
         """Register command and message handlers."""
+        # Auth filter for all handlers
+        auth = self.auth_filter
+
         # Basic commands
-        self.app.add_handler(CommandHandler("start", start_command))
-        self.app.add_handler(CommandHandler("help", help_command))
+        self.app.add_handler(CommandHandler("start", start_command, filters=auth))
+        self.app.add_handler(CommandHandler("help", help_command, filters=auth))
 
         # Project commands
-        self.app.add_handler(CommandHandler("projects", projects_command))
-        self.app.add_handler(CommandHandler("scan", scan_command))
+        self.app.add_handler(CommandHandler("projects", projects_command, filters=auth))
+        self.app.add_handler(CommandHandler("scan", scan_command, filters=auth))
 
         # Session commands
-        self.app.add_handler(CommandHandler("sessions", sessions_command))
-        self.app.add_handler(CommandHandler("new", new_session_command))
-        self.app.add_handler(CommandHandler("use", use_session_command))
-        self.app.add_handler(CommandHandler("close", close_session_command))
-        self.app.add_handler(CommandHandler("status", status_command))
+        self.app.add_handler(CommandHandler("sessions", sessions_command, filters=auth))
+        self.app.add_handler(CommandHandler("new", new_session_command, filters=auth))
+        self.app.add_handler(CommandHandler("use", use_session_command, filters=auth))
+        self.app.add_handler(
+            CommandHandler("close", close_session_command, filters=auth)
+        )
+        self.app.add_handler(CommandHandler("status", status_command, filters=auth))
 
         # Reply-to message handler (for session routing)
         self.app.add_handler(
             MessageHandler(
-                filters.TEXT & filters.REPLY & ~filters.COMMAND,
+                auth & filters.TEXT & filters.REPLY & ~filters.COMMAND,
                 handle_reply_message,
             )
         )
 
         # Task commands
-        self.app.add_handler(CommandHandler("tasks", tasks_command))
-        self.app.add_handler(CommandHandler("next", next_tasks_command))
-        self.app.add_handler(CommandHandler("claim", claim_task_command))
-        self.app.add_handler(CommandHandler("sync", sync_backlog_command))
+        self.app.add_handler(CommandHandler("tasks", tasks_command, filters=auth))
+        self.app.add_handler(CommandHandler("next", next_tasks_command, filters=auth))
+        self.app.add_handler(CommandHandler("claim", claim_task_command, filters=auth))
+        self.app.add_handler(CommandHandler("sync", sync_backlog_command, filters=auth))
 
         # Job commands
-        self.app.add_handler(CommandHandler("run", run_command))
-        self.app.add_handler(CommandHandler("jobs", jobs_command))
-        self.app.add_handler(CommandHandler("summary", summary_command))
-        self.app.add_handler(CommandHandler("tail", tail_command))
-        self.app.add_handler(CommandHandler("cancel", cancel_command))
+        self.app.add_handler(CommandHandler("run", run_command, filters=auth))
+        self.app.add_handler(CommandHandler("jobs", jobs_command, filters=auth))
+        self.app.add_handler(CommandHandler("summary", summary_command, filters=auth))
+        self.app.add_handler(CommandHandler("tail", tail_command, filters=auth))
+        self.app.add_handler(CommandHandler("cancel", cancel_command, filters=auth))
 
         # Approval commands
-        self.app.add_handler(CommandHandler("approvals", approvals_command))
+        self.app.add_handler(
+            CommandHandler("approvals", approvals_command, filters=auth)
+        )
 
         # Callback query handlers (for inline keyboards)
+        # Note: CallbackQueryHandler checks auth in the handler itself
         self.app.add_handler(
             CallbackQueryHandler(
-                session_callback_handler,
+                self._auth_callback_wrapper(session_callback_handler),
                 pattern="^session:",
             )
         )
         self.app.add_handler(
             CallbackQueryHandler(
-                task_callback_handler,
+                self._auth_callback_wrapper(task_callback_handler),
                 pattern="^task:",
             )
         )
         self.app.add_handler(
             CallbackQueryHandler(
-                approval_callback_handler,
+                self._auth_callback_wrapper(approval_callback_handler),
                 pattern="^approval:",
             )
         )
@@ -177,18 +236,79 @@ class TeleVibeBot:
         # Natural language handler (non-command, non-reply text)
         self.app.add_handler(
             MessageHandler(
-                filters.TEXT & ~filters.COMMAND & ~filters.REPLY,
+                auth & filters.TEXT & ~filters.COMMAND & ~filters.REPLY,
                 natural_language_handler,
             )
         )
 
-        # Fallback for unknown commands
+        # Fallback for unknown commands (still requires auth)
         self.app.add_handler(
             MessageHandler(
-                filters.COMMAND,
+                auth & filters.COMMAND,
                 self._unknown_command,
             )
         )
+
+        # Unauthorized handler - catches messages from non-whitelisted users
+        # Only active if whitelist is configured
+        if self.settings.telegram_allowed_chat_ids:
+            self.app.add_handler(
+                MessageHandler(
+                    filters.ALL & ~auth,
+                    self._unauthorized_handler,
+                ),
+                group=1,  # Lower priority group
+            )
+            self.app.add_handler(
+                CallbackQueryHandler(
+                    self._unauthorized_callback,
+                ),
+                group=1,
+            )
+
+    def _auth_callback_wrapper(self, handler):
+        """Wrap a callback handler with auth check.
+
+        Args:
+            handler: Original callback handler function.
+
+        Returns:
+            Wrapped handler that checks auth first.
+        """
+
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if not self.auth_filter.check_update(update):
+                await self._unauthorized_callback(update, context)
+                return
+            return await handler(update, context)
+
+        return wrapper
+
+    async def _unauthorized_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle messages from unauthorized users."""
+        chat_id = update.effective_chat.id if update.effective_chat else "unknown"
+        log.warning(
+            "unauthorized_access_attempt",
+            chat_id=chat_id,
+            username=update.effective_user.username if update.effective_user else None,
+        )
+        await update.message.reply_text(
+            "Access denied.\n\n"
+            f"Your chat ID: `{chat_id}`\n\n"
+            "This bot is private. If you are the owner, add your chat ID to "
+            "TELEGRAM_ALLOWED_CHAT_IDS in your .env file.",
+            parse_mode="Markdown",
+        )
+
+    async def _unauthorized_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle callback queries from unauthorized users."""
+        query = update.callback_query
+        if query:
+            await query.answer("Access denied.", show_alert=True)
 
     async def _unknown_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
