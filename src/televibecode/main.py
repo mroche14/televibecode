@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import structlog
+from dotenv import load_dotenv
 
 from televibecode import __version__
 from televibecode.config import load_settings
@@ -49,6 +50,12 @@ async def serve(root: Path) -> None:
     Args:
         root: Projects root directory.
     """
+    # Load .env into os.environ (required for agno and other libs)
+    env_file = root / ".env"
+    if not env_file.exists():
+        env_file = root / ".televibe" / ".env"
+    load_dotenv(env_file if env_file.exists() else None)
+
     # Load settings
     settings = load_settings(root)
     settings.ensure_dirs()
