@@ -244,7 +244,7 @@ class TeleVibeBot:
         self.app.add_handler(
             CallbackQueryHandler(
                 self._auth_callback_wrapper(model_callback_handler),
-                pattern="^model:",
+                pattern="^m:",
             )
         )
 

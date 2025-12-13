@@ -2283,10 +2283,150 @@ def _get_tier_medal(rank: int) -> str:
     return f"{rank}."
 
 
+# Models per page for pagination
+MODELS_PER_PAGE = 8
+
+
+def _build_models_page(
+    models: list,
+    page: int,
+    filter_type: str,
+    current_model_id: str | None,
+    max_score: float,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build paginated models display.
+
+    Args:
+        models: List of ModelInfo objects.
+        page: Current page (0-indexed).
+        filter_type: Filter type (all, free, gem, or).
+        current_model_id: Currently selected model ID.
+        max_score: Maximum rank score for scaling.
+
+    Returns:
+        Tuple of (message_text, keyboard).
+    """
+    total_pages = (len(models) + MODELS_PER_PAGE - 1) // MODELS_PER_PAGE
+    if total_pages == 0:
+        total_pages = 1
+
+    # Clamp page
+    page = max(0, min(page, total_pages - 1))
+
+    # Get models for this page
+    start_idx = page * MODELS_PER_PAGE
+    end_idx = start_idx + MODELS_PER_PAGE
+    page_models = models[start_idx:end_idx]
+
+    # Build header
+    filter_names = {"all": "All", "free": "Free", "gem": "Gemini", "or": "OpenRouter"}
+    filter_name = filter_names.get(filter_type, "All")
+
+    text = f"🤖 *AI Models* — {filter_name}\n"
+    text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    # Show current model
+    if current_model_id:
+        icon = _get_provider_icon(current_model_id)
+        if len(current_model_id) > 30:
+            short_id = current_model_id[:30] + "..."
+        else:
+            short_id = current_model_id
+        text += f"📍 *Current:* {icon} `{short_id}`\n\n"
+
+    # Build model list
+    keyboard_rows = []
+
+    for i, m in enumerate(page_models):
+        global_idx = start_idx + i
+        icon = _get_provider_icon(m.id)
+        rank = global_idx + 1
+        medal = _get_tier_medal(rank) if rank <= 3 else f"{rank}."
+        bar = _get_quality_bar(m.rank_score, max_score)
+        selected = " ✓" if m.id == current_model_id else ""
+
+        # Display ID (truncated)
+        display_id = m.id
+        if len(display_id) > 32:
+            display_id = display_id[:29] + "..."
+
+        text += f"{medal} {icon} `{display_id}`{selected}\n"
+        text += f"     {bar} _{m.rank_score:.0f}pts_\n"
+
+        # Create button - use index to avoid long callback data
+        parts = m.id.replace(":free", "").split("/")
+        short_name = parts[-1] if len(parts) > 1 else parts[0]
+        short_name = short_name[:14]
+        label = f"{icon} {short_name}"
+
+        # Callback: m:s:INDEX (select by index)
+        callback = f"m:s:{global_idx}"
+        keyboard_rows.append([InlineKeyboardButton(label, callback_data=callback)])
+
+    text += "\n━━━━━━━━━━━━━━━━━━━━━\n"
+    text += "💡 Tap to select model"
+
+    # Navigation row
+    nav_row = []
+    if page > 0:
+        prev_data = f"m:p:{page - 1}:{filter_type}"
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=prev_data))
+    if page < total_pages - 1:
+        next_data = f"m:p:{page + 1}:{filter_type}"
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=next_data))
+
+    if nav_row:
+        keyboard_rows.append(nav_row)
+
+    # Filter row
+    filter_row = []
+    filters = [("all", "All"), ("free", "🆓"), ("gem", "💎"), ("or", "🌐")]
+    for f_key, f_label in filters:
+        label = f"[{f_label}]" if f_key == filter_type else f_label
+        filter_row.append(
+            InlineKeyboardButton(label, callback_data=f"m:f:{f_key}")
+        )
+    keyboard_rows.append(filter_row)
+
+    # Refresh button
+    keyboard_rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="m:r")])
+
+    return text, InlineKeyboardMarkup(keyboard_rows)
+
+
+async def _get_filtered_models(
+    settings: Settings, filter_type: str
+) -> list:
+    """Get models with filter applied.
+
+    Args:
+        settings: Application settings.
+        filter_type: Filter type (all, free, gem, or).
+
+    Returns:
+        Filtered list of ModelInfo.
+    """
+    models = await ModelRegistry.get_all_available_models(
+        openrouter_key=settings.openrouter_api_key,
+        gemini_key=settings.gemini_api_key,
+        free_only=(filter_type in ("all", "free")),
+    )
+
+    if filter_type == "gem":
+        models = [m for m in models if m.provider.value == "gemini"]
+    elif filter_type == "or":
+        models = [m for m in models if m.provider.value == "openrouter"]
+    elif filter_type == "free":
+        models = [m for m in models if m.is_free]
+
+    return models
+
+
 async def models_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle /models command - list available AI models."""
+    """Handle /models command - list available AI models with pagination."""
     settings = get_settings(context)
     chat_state = get_chat_state(context)
     chat_id = update.effective_chat.id
@@ -2303,16 +2443,17 @@ async def models_command(
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # Get available models
-    models = await ModelRegistry.get_all_available_models(
-        openrouter_key=settings.openrouter_api_key,
-        gemini_key=settings.gemini_api_key,
-        free_only=True,
-    )
+    # Get available models (default filter: all free)
+    filter_type = "all"
+    models = await _get_filtered_models(settings, filter_type)
 
     if not models:
-        await update.message.reply_text("No free models available.")
+        await update.message.reply_text("No models available.")
         return
+
+    # Store models in user_data for callback selection
+    context.user_data["models_cache"] = models
+    context.user_data["models_filter"] = filter_type
 
     # Get current model
     current_model_id, _ = chat_state.get_ai_model(chat_id)
@@ -2320,82 +2461,13 @@ async def models_command(
     # Find max score for scaling
     max_score = max(m.rank_score for m in models) if models else 1.0
 
-    # Build nice display
-    text = "🤖 *AI Models* _(free, ranked by quality)_\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-    # Show current model
-    if current_model_id:
-        current_icon = _get_provider_icon(current_model_id)
-        text += f"📍 *Current:* {current_icon} `{current_model_id}`\n\n"
-
-    # Show top 20 models
-    top_models = models[:20]
-
-    # Group into tiers
-    text += "🏆 *Top Models*\n"
-    for i, m in enumerate(top_models[:10], 1):
-        icon = _get_provider_icon(m.id)
-        medal = _get_tier_medal(i)
-        bar = _get_quality_bar(m.rank_score, max_score)
-        selected = " ✓" if m.id == current_model_id else ""
-
-        # Shorten model ID for display
-        display_id = m.id
-        if len(display_id) > 35:
-            display_id = display_id[:32] + "..."
-
-        text += f"{medal} {icon} `{display_id}`{selected}\n"
-        text += f"     {bar} _{m.rank_score:.0f}pts_\n"
-
-    # Show more models in compact form
-    if len(top_models) > 10:
-        text += "\n📋 *More Options*\n"
-        for m in top_models[10:20]:
-            icon = _get_provider_icon(m.id)
-            selected = " ✓" if m.id == current_model_id else ""
-            display_id = m.id[:35] + "..." if len(m.id) > 35 else m.id
-            text += f"  {icon} `{display_id}`{selected}\n"
-
-    text += "\n━━━━━━━━━━━━━━━━━━━━━\n"
-    text += "💡 Tap a button or use `/model <id>`"
-
-    # Create inline keyboard - top 6 models with short names
-    keyboard = []
-    row = []
-
-    for m in top_models[:6]:
-        # Create short display name
-        icon = _get_provider_icon(m.id)
-        # Extract meaningful part of model name
-        parts = m.id.replace(":free", "").split("/")
-        short = parts[-1] if len(parts) > 1 else parts[0]
-        short = short[:12]
-        label = f"{icon} {short}"
-
-        callback_data = f"model:select:{m.provider.value}:{m.id}"
-
-        # Telegram has 64 byte limit for callback_data
-        if len(callback_data) > 64:
-            continue
-
-        row.append(InlineKeyboardButton(label, callback_data=callback_data))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-
-    if row:
-        keyboard.append(row)
-
-    # Add refresh button
-    keyboard.append([
-        InlineKeyboardButton("🔄 Refresh", callback_data="model:refresh"),
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
+    # Build paginated display (start at page 0)
+    text, keyboard = _build_models_page(
+        models, page=0, filter_type=filter_type,
+        current_model_id=current_model_id, max_score=max_score
     )
+
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def model_command(
@@ -2458,7 +2530,14 @@ async def model_command(
 async def model_callback_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle model selection callbacks."""
+    """Handle model selection callbacks with pagination.
+
+    Callback formats:
+    - m:p:PAGE:FILTER - Navigate to page
+    - m:f:FILTER - Change filter (all, free, gem, or)
+    - m:s:INDEX - Select model by index
+    - m:r - Refresh model list
+    """
     query = update.callback_query
     await query.answer()
 
@@ -2467,35 +2546,117 @@ async def model_callback_handler(
     chat_id = query.message.chat.id
 
     data = query.data
-    parts = data.split(":", 3)  # model:action:provider:model_id
+    parts = data.split(":")
 
     if len(parts) < 2:
         return
 
     action = parts[1]
 
-    if action == "refresh":
-        # Fetch fresh models
-        models = await ModelRegistry.get_all_available_models(
-            openrouter_key=settings.openrouter_api_key,
-            gemini_key=settings.gemini_api_key,
-            free_only=True,
-        )
+    # Get cached models or fetch fresh
+    models = context.user_data.get("models_cache", [])
+    filter_type = context.user_data.get("models_filter", "all")
 
+    # Handle refresh
+    if action == "r":
+        models = await _get_filtered_models(settings, filter_type)
+        context.user_data["models_cache"] = models
+
+        if not models:
+            await query.edit_message_text("No models available.")
+            return
+
+        current_model_id, _ = chat_state.get_ai_model(chat_id)
+        max_score = max(m.rank_score for m in models) if models else 1.0
+
+        text, keyboard = _build_models_page(
+            models, page=0, filter_type=filter_type,
+            current_model_id=current_model_id, max_score=max_score
+        )
         await query.edit_message_text(
-            f"Refreshed! Found {len(models)} free models.\n\n"
-            f"Use /models to see the updated list."
+            text, parse_mode="Markdown", reply_markup=keyboard
         )
         return
 
-    if action == "select" and len(parts) >= 4:
-        provider = parts[2]
-        model_id = parts[3]
+    # Handle page navigation: m:p:PAGE:FILTER
+    if action == "p" and len(parts) >= 4:
+        page = int(parts[2])
+        filter_type = parts[3]
+
+        # Refresh models if cache is empty
+        if not models:
+            models = await _get_filtered_models(settings, filter_type)
+            context.user_data["models_cache"] = models
+            context.user_data["models_filter"] = filter_type
+
+        if not models:
+            await query.edit_message_text("No models available.")
+            return
+
+        current_model_id, _ = chat_state.get_ai_model(chat_id)
+        max_score = max(m.rank_score for m in models) if models else 1.0
+
+        text, keyboard = _build_models_page(
+            models, page=page, filter_type=filter_type,
+            current_model_id=current_model_id, max_score=max_score
+        )
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=keyboard
+        )
+        return
+
+    # Handle filter change: m:f:FILTER
+    if action == "f" and len(parts) >= 3:
+        filter_type = parts[2]
+
+        # Fetch models with new filter
+        models = await _get_filtered_models(settings, filter_type)
+        context.user_data["models_cache"] = models
+        context.user_data["models_filter"] = filter_type
+
+        if not models:
+            await query.edit_message_text(
+                f"No models available for filter: {filter_type}\n\n"
+                "Try a different filter.",
+            )
+            return
+
+        current_model_id, _ = chat_state.get_ai_model(chat_id)
+        max_score = max(m.rank_score for m in models) if models else 1.0
+
+        text, keyboard = _build_models_page(
+            models, page=0, filter_type=filter_type,
+            current_model_id=current_model_id, max_score=max_score
+        )
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=keyboard
+        )
+        return
+
+    # Handle model selection: m:s:INDEX
+    if action == "s" and len(parts) >= 3:
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            return
+
+        if not models or idx >= len(models):
+            await query.edit_message_text(
+                "Model list expired. Use /models to refresh."
+            )
+            return
+
+        model = models[idx]
 
         # Set the model
-        chat_state.set_ai_model(chat_id, model_id, provider)
+        chat_state.set_ai_model(chat_id, model.id, model.provider.value)
 
+        icon = _get_provider_icon(model.id)
         await query.edit_message_text(
-            f"Model switched to `{model_id}`",
+            f"✅ *Model Selected*\n\n"
+            f"{icon} `{model.id}`\n\n"
+            f"Provider: {model.provider.value}\n"
+            f"Context: {model.context_length:,} tokens\n"
+            f"Free: {'Yes' if model.is_free else 'No'}",
             parse_mode="Markdown",
         )
