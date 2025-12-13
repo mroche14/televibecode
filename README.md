@@ -86,6 +86,12 @@ The bot uses a lightweight LLM for understanding natural language. Free options:
 - **Gemini** (recommended): https://aistudio.google.com/apikey
 - **OpenRouter**: https://openrouter.ai (free models available)
 
+> **OpenRouter Free Models**: To use free models on OpenRouter, you must enable data sharing in your [privacy settings](https://openrouter.ai/settings/privacy):
+> - Enable "Free endpoints that may train on inputs" - allows providers to use prompts for training
+> - Enable "Free endpoints that may publish prompts" - allows prompts to be published to public datasets
+>
+> Without these settings, free model requests will fail with a 404 error.
+
 ### 3. Install and Run
 
 ```bash

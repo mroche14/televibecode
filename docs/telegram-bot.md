@@ -423,6 +423,33 @@ Bot: 🔹 Active Sessions:
 
 **Model:** `whisper-large-v3-turbo` (fastest, high quality)
 
+### AI Model Selection
+
+Use `/models` to browse available AI models and `/model` to switch.
+
+**Commands:**
+- `/models` - Browse all available models (paginated, grouped by provider)
+- `/model` - Show currently selected model
+- `/model <id>` - Switch to a specific model
+
+**Supported Providers:**
+- **Gemini**: Requires `GEMINI_API_KEY`
+- **OpenRouter**: Requires `OPENROUTER_API_KEY` (access to many free and paid models)
+
+**OpenRouter Free Models:**
+
+To use free models on OpenRouter, you must configure your [privacy settings](https://openrouter.ai/settings/privacy):
+
+1. **Enable "Free endpoints that may train on inputs"** - Allows free model providers to retain and/or train on your prompts and completions
+2. **Enable "Free endpoints that may publish prompts"** - Allows free model providers to publish your prompts to public datasets
+
+Without these settings enabled, free model requests will fail with error:
+```
+No endpoints found matching your data policy (Free model publication)
+```
+
+If you don't want your prompts shared, use paid models or Gemini instead.
+
 ---
 
 ## Bot State
