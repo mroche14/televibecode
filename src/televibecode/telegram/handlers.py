@@ -5,7 +5,7 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from televibecode.ai import IntentType, classify_message
-from televibecode.ai.models import ModelRegistry, Provider
+from televibecode.ai.models import ModelRegistry
 from televibecode.config import Settings
 from televibecode.db import (
     Database,
@@ -2218,6 +2218,50 @@ async def _run_as_instruction(
 # =============================================================================
 
 
+def _get_provider_icon(model_id: str) -> str:
+    """Get icon for model provider."""
+    model_lower = model_id.lower()
+    if "grok" in model_lower or "x-ai" in model_lower:
+        return "⚡"  # Grok
+    if "gemini" in model_lower or "google" in model_lower:
+        return "💎"  # Gemini
+    if "gpt" in model_lower or "openai" in model_lower:
+        return "🧠"  # OpenAI
+    if "claude" in model_lower or "anthropic" in model_lower:
+        return "🎭"  # Claude
+    if "llama" in model_lower or "meta" in model_lower:
+        return "🦙"  # Llama
+    if "deepseek" in model_lower:
+        return "🔍"  # DeepSeek
+    if "mistral" in model_lower:
+        return "🌀"  # Mistral
+    if "qwen" in model_lower:
+        return "🐼"  # Qwen
+    if "gemma" in model_lower:
+        return "💠"  # Gemma
+    return "🤖"
+
+
+def _get_quality_bar(score: float, max_score: float = 100.0) -> str:
+    """Get visual quality bar."""
+    if max_score == 0:
+        return ""
+    ratio = min(score / max_score, 1.0)
+    filled = int(ratio * 5)
+    return "█" * filled + "░" * (5 - filled)
+
+
+def _get_tier_medal(rank: int) -> str:
+    """Get medal for top ranks."""
+    if rank == 1:
+        return "🥇"
+    if rank == 2:
+        return "🥈"
+    if rank == 3:
+        return "🥉"
+    return f"{rank}."
+
+
 async def models_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2228,8 +2272,11 @@ async def models_command(
 
     if not settings.has_ai:
         await update.message.reply_text(
-            "No AI providers configured.\n\n"
-            "Add GEMINI_API_KEY or OPENROUTER_API_KEY to your .env file."
+            "❌ *No AI providers configured*\n\n"
+            "Add to your `.env` file:\n"
+            "• `OPENROUTER_API_KEY` - many free models\n"
+            "• `GEMINI_API_KEY` - Google's models",
+            parse_mode="Markdown",
         )
         return
 
@@ -2247,55 +2294,71 @@ async def models_command(
         return
 
     # Get current model
-    current_model_id, current_provider = chat_state.get_ai_model(chat_id)
+    current_model_id, _ = chat_state.get_ai_model(chat_id)
 
-    # Build message with top models
-    text = "*Available AI Models* (ranked by quality)\n\n"
+    # Find max score for scaling
+    max_score = max(m.rank_score for m in models) if models else 1.0
+
+    # Build nice display
+    text = "🤖 *AI Models* _(free, ranked by quality)_\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     # Show current model
     if current_model_id:
-        text += f"Current: `{current_model_id}`\n\n"
-    else:
-        text += "Current: _auto (best available)_\n\n"
+        current_icon = _get_provider_icon(current_model_id)
+        text += f"📍 *Current:* {current_icon} `{current_model_id}`\n\n"
 
-    # Show top 15 models with inline buttons
-    top_models = models[:15]
+    # Show top 20 models
+    top_models = models[:20]
 
-    # Group by provider
-    openrouter_models = [m for m in top_models if m.provider == Provider.OPENROUTER]
-    gemini_models = [m for m in top_models if m.provider == Provider.GEMINI]
+    # Group into tiers
+    text += "🏆 *Top Models*\n"
+    for i, m in enumerate(top_models[:10], 1):
+        icon = _get_provider_icon(m.id)
+        medal = _get_tier_medal(i)
+        bar = _get_quality_bar(m.rank_score, max_score)
+        selected = " ✓" if m.id == current_model_id else ""
 
-    if gemini_models:
-        text += "*Gemini*\n"
-        for i, m in enumerate(gemini_models[:5], 1):
-            current = " ✓" if m.id == current_model_id else ""
-            text += f"{i}. `{m.id}`{current}\n"
-        text += "\n"
+        # Shorten model ID for display
+        display_id = m.id
+        if len(display_id) > 35:
+            display_id = display_id[:32] + "..."
 
-    if openrouter_models:
-        text += "*OpenRouter* (free)\n"
-        for i, m in enumerate(openrouter_models[:10], 1):
-            current = " ✓" if m.id == current_model_id else ""
-            # Show score for context
-            score = f"[{m.rank_score:.2f}]" if m.rank_score > 0 else ""
-            text += f"{i}. `{m.id}` {score}{current}\n"
+        text += f"{medal} {icon} `{display_id}`{selected}\n"
+        text += f"     {bar} _{m.rank_score:.0f}pts_\n"
 
-    text += "\nUse /model <id> to switch models."
+    # Show more models in compact form
+    if len(top_models) > 10:
+        text += "\n📋 *More Options*\n"
+        for m in top_models[10:20]:
+            icon = _get_provider_icon(m.id)
+            selected = " ✓" if m.id == current_model_id else ""
+            display_id = m.id[:35] + "..." if len(m.id) > 35 else m.id
+            text += f"  {icon} `{display_id}`{selected}\n"
 
-    # Create inline keyboard for quick selection
+    text += "\n━━━━━━━━━━━━━━━━━━━━━\n"
+    text += "💡 Tap a button or use `/model <id>`"
+
+    # Create inline keyboard - top 6 models with short names
     keyboard = []
     row = []
 
-    for m in top_models[:8]:
-        short_name = m.name[:15] if len(m.name) > 15 else m.name
+    for m in top_models[:6]:
+        # Create short display name
+        icon = _get_provider_icon(m.id)
+        # Extract meaningful part of model name
+        parts = m.id.replace(":free", "").split("/")
+        short = parts[-1] if len(parts) > 1 else parts[0]
+        short = short[:12]
+        label = f"{icon} {short}"
+
         callback_data = f"model:select:{m.provider.value}:{m.id}"
 
         # Telegram has 64 byte limit for callback_data
         if len(callback_data) > 64:
-            # Use index-based selection for long IDs
             continue
 
-        row.append(InlineKeyboardButton(short_name, callback_data=callback_data))
+        row.append(InlineKeyboardButton(label, callback_data=callback_data))
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -2304,7 +2367,9 @@ async def models_command(
         keyboard.append(row)
 
     # Add refresh button
-    keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="model:refresh")])
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="model:refresh"),
+    ])
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await update.message.reply_text(
