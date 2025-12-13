@@ -4,168 +4,221 @@
   <img src="docs/hero.png" alt="TeleVibeCode - Command your AI coding swarm from anywhere" width="800">
 </p>
 
-Remote orchestration harness for managing multiple Claude Code + SuperClaude sessions via Telegram.
+**Control Claude Code sessions from your phone via Telegram.** Run coding tasks, monitor progress, and approve changes—all while away from your desk.
 
-## Overview
+## What It Does
 
-TeleVibeCode enables "virtual coders" - parallel AI coding sessions that can be controlled, monitored, and coordinated from your mobile device.
+TeleVibeCode lets you:
 
-**Core Principle**: Telegram only talks to the Orchestrator MCP.
+1. **Start coding sessions** on any of your git repositories
+2. **Send instructions** to Claude Code ("add login validation", "fix the failing tests")
+3. **Monitor progress** with live updates as Claude works
+4. **Approve dangerous operations** before they execute (git push, file deletions, shell commands)
+5. **Manage multiple sessions** across different projects simultaneously
+
+Each session runs in an isolated git worktree, so parallel work on the same repo is safe.
+
+## Example Interaction
 
 ```
-Telegram Bot ↔ Orchestrator MCP ↔ Sessions / Repos / Tasks / Claude Code + SuperClaude
+You:  /projects
+Bot:  📂 my-webapp (3 sessions)
+      📂 my-api (1 session)
+      📂 shared-lib (idle)
+
+You:  /new my-webapp feature/auth
+Bot:  ✅ Created session S12 on my-webapp
+      🌿 Branch: feature/auth
+      📁 Workspace: ~/.televibe/workspaces/my-webapp/S12/
+
+You:  /run Add email validation to the signup form
+Bot:  🔧 Running... [████████░░░░░░░░░░░░]
+      ⏱️ 12s
+      🔨 Edit
+      📝 2 files
+
+Bot:  ✅ Done
+      Modified: src/components/SignupForm.tsx, src/utils/validation.ts
+      Added email format validation with error messages
+
+You:  /run Push the changes
+Bot:  ⚠️ Approval Required
+      ⬆️ Type: Git Push
+      📂 Session: S12
+      🔹 Action: git push origin feature/auth
+
+      [✅ Approve] [❌ Deny]
 ```
 
-## Architecture
+## How It Works
 
-| Layer | Components |
-|-------|------------|
-| **Layer 0** | Claude Code CLI + SuperClaude Framework |
-| **Layer 1** | Orchestrator MCP + Telegram Bot + Runner |
-| **Layer 2** | Backlog.md task management per repo |
-| **Layer 3** | Multi-agent orchestration via SuperClaude |
+```
+┌─────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Telegram   │────▶│   TeleVibeCode  │────▶│   Claude Code   │
+│  (your phone)     │   (orchestrator)│     │   (in worktree) │
+└─────────────┘     └─────────────────┘     └─────────────────┘
+                            │
+                    ┌───────┴───────┐
+                    │   SQLite DB   │
+                    │ (state, jobs) │
+                    └───────────────┘
+```
 
-## Features
+TeleVibeCode runs as a server on your dev machine (or a VPS). It:
+- Receives commands from Telegram
+- Manages git worktrees for session isolation
+- Spawns Claude Code processes with your instructions
+- Streams progress back to Telegram
+- Gates dangerous operations behind approval buttons
 
-- **Multi-Project Management**: Manage multiple repositories from a central location
-- **Session Isolation**: Each session runs in its own git worktree
-- **Task Integration**: Backlog.md integration for in-repo task tracking
-- **Remote Control**: Run instructions, view logs, approve actions via Telegram
-- **Approval Gating**: Require approval for sensitive operations (push, deploy)
+## Quick Start
 
-## Installation & Usage
+### 1. Get a Telegram Bot Token
+
+1. Open Telegram, search for `@BotFather`
+2. Send `/newbot` and follow the prompts
+3. Copy the token (looks like `7123456789:AAH...`)
+
+### 2. Get an AI API Key (for intent classification)
+
+The bot uses a lightweight LLM for understanding natural language. Free options:
+
+- **Gemini** (recommended): https://aistudio.google.com/apikey
+- **OpenRouter**: https://openrouter.ai (free models available)
+
+### 3. Install and Run
 
 ```bash
-# Install TeleVibeCode
+# Install
 uv tool install televibecode
 # or: pip install televibecode
 
-# Run the server, pointed at your projects directory
-televibecode serve --root ~/projects
-
-# Or with explicit config
-televibecode serve --root ~/projects --config ~/projects/.televibe/config.yaml
-```
-
-## Configuration
-
-### Required Environment Variables
-
-```bash
-# Telegram Bot Token (required)
-# Create a bot via @BotFather on Telegram
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-
-# AI API Key for intermediate intelligence layer (required)
-# Used for natural language parsing and intent detection
-AGNO_API_KEY=your_api_key_here
-AGNO_PROVIDER=gemini  # gemini | anthropic | openai | openrouter
-```
-
-### Free API Options
-
-**Gemini (Recommended)**
-- Free API key at: https://aistudio.google.com/apikey
-- Generous free tier (15 RPM for Gemini 1.5 Flash)
-- Set `AGNO_PROVIDER=gemini`
-
-**OpenRouter**
-- Sign up at: https://openrouter.ai
-- Free models: `grok-beta`, `mistral-7b-instruct`
-- Set `AGNO_PROVIDER=openrouter` and `AGNO_MODEL=grok-beta`
-
-### Example .env
-
-```bash
+# Create .env in your projects directory
+cat > ~/projects/.env << 'EOF'
 TELEGRAM_BOT_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 AGNO_PROVIDER=gemini
 AGNO_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+EOF
+
+# Run (points at your existing projects folder)
+televibecode serve --root ~/projects
 ```
 
-### Startup Checks
+### 4. Start Chatting
 
-If required variables are missing, the server will prompt or exit with helpful messages:
+Open your bot in Telegram and send `/help`.
 
-```
-Missing required environment variable: TELEGRAM_BOT_TOKEN
-Get your token from @BotFather on Telegram.
+## Directory Layout
 
-Missing required environment variable: AGNO_API_KEY
-Set AGNO_PROVIDER and AGNO_API_KEY. Free option: Gemini at https://aistudio.google.com/apikey
-```
-
-**Load order**: `.env` file in `--root` directory → environment variables → CLI flags
-
-## Projects Root Layout
-
-Point TeleVibeCode at your **existing projects folder**. No restructuring needed:
+TeleVibeCode creates a `.televibe/` folder in your projects root. Your repositories stay untouched:
 
 ```
 ~/projects/                     # Your existing projects folder
-├── .televibe/                  # TeleVibeCode artifacts (auto-created)
-│   ├── state.db
-│   ├── config.yaml
-│   ├── logs/
-│   └── workspaces/             # Session worktrees
-│       └── my-web-app/S12/feature-auth/
-├── my-web-app/                 # Your repos stay where they are
+├── .televibe/                  # TeleVibeCode data (auto-created)
+│   ├── state.db               # Sessions, jobs, approvals
+│   ├── logs/                  # Job execution logs
+│   └── workspaces/            # Git worktrees per session
+│       └── my-webapp/S12/     # Session S12's isolated workspace
+├── my-webapp/                  # Your repos (unchanged)
 ├── my-api/
-└── my-library/
+└── shared-lib/
 ```
 
 ## Telegram Commands
 
+### Projects & Sessions
 | Command | Description |
 |---------|-------------|
-| `/projects` | List all registered projects |
-| `/sessions` | List active sessions |
-| `/new <project> [branch]` | Create new session |
-| `/use <session>` | Set active session |
-| `/run <instruction>` | Run instruction in session |
-| `/status` | Get current job status |
-| `/tasks <project>` | List project tasks |
-| `/approvals` | List pending approvals |
+| `/projects` | List registered git repositories |
+| `/scan` | Scan for new repositories in root |
+| `/sessions` | List all active sessions |
+| `/new <project> [branch]` | Create session with optional branch |
+| `/use <session>` | Set session as active (for subsequent commands) |
+| `/close [session]` | Close a session |
 
-## Documentation
+### Running Instructions
+| Command | Description |
+|---------|-------------|
+| `/run <instruction>` | Execute instruction in active session |
+| `/status` | Current session/job status |
+| `/jobs [session]` | List recent jobs |
+| `/tail [job]` | View job logs |
+| `/cancel` | Cancel running job |
 
-### Core Specs
-- [Architecture](docs/architecture.md) - High-level system design
-- [Data Models](docs/data-models.md) - Entity schemas and SQLite DDL
-- [Orchestrator MCP](docs/orchestrator-mcp.md) - MCP tool specifications
-- [Telegram Bot](docs/telegram-bot.md) - Commands and UX patterns
+### Tasks & Approvals
+| Command | Description |
+|---------|-------------|
+| `/tasks [project]` | List backlog tasks |
+| `/claim <task>` | Assign task to current session |
+| `/sync` | Sync tasks from Backlog.md files |
+| `/approvals` | List pending approval requests |
 
-### Deep Dives
-- [Runner Integration](docs/runner-integration.md) - Claude Code execution, hooks, permissions
-- [Multi-Session Coordination](docs/multi-session.md) - Session handoffs, team patterns
-- [Event Streaming](docs/event-streaming.md) - Real-time updates, log streaming
+### Other
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands |
+| `/settings` | View/change notification settings |
 
-### Requirements & Operations
-- [Requirements](docs/requirements.md) - NFRs, acceptance criteria, behavior scenarios
-- [Operations](docs/operations.md) - Failure modes, circuit breakers, monitoring, runbooks
-- [Spec Review](docs/spec-review.md) - Expert panel analysis and recommendations
+## Configuration
 
-### Planning
-- [Implementation Roadmap](docs/roadmap.md) - Phased development plan
-- [Implementation Workflow](docs/workflow.md) - Step-by-step task breakdown
-- [Technology Reference](docs/technology-reference.md) - Implementation patterns for all dependencies
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
+| `AGNO_API_KEY` | No* | API key for intent classification |
+| `AGNO_PROVIDER` | No | `gemini`, `anthropic`, `openai`, `openrouter` |
+| `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `MAX_CONCURRENT_JOBS` | No | Default: 3 |
+
+*Intent classification falls back to pattern matching if no API key is set.
+
+### Load Order
+
+1. `.env` file in `--root` directory
+2. `.env` file in `--root/.televibe/`
+3. Environment variables
+4. CLI flags
+
+## Current Status
+
+**Implemented (Phases 1-5):**
+- Project and session management
+- Job execution with progress streaming
+- Telegram bot with all core commands
+- Approval workflow for gated operations
+- SQLite persistence
+- Backlog.md task parsing
+- Natural language intent classification
+
+**Coming Soon (Phase 6):**
+- Multi-agent coordination via SuperClaude
+- Session handoffs
+- Team/shared access patterns
 
 ## Development
 
 ```bash
-# Clone and install dependencies
 git clone https://github.com/mroche14/televibecode
 cd televibecode
 uv sync
 
-# Run in development mode
-uv run televibecode serve --root /path/to/test/projects
-
 # Run tests
 uv run pytest
 
-# Lint
+# Lint & type check
 uv run ruff check .
+uv run mypy src/
+
+# Run locally
+uv run televibecode serve --root /path/to/test/projects
 ```
+
+## Requirements
+
+- Python 3.12+
+- Claude Code CLI installed and authenticated
+- Telegram account
 
 ## License
 
