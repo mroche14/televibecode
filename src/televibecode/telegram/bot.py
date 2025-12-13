@@ -102,7 +102,7 @@ class TeleVibeBot:
         """
         self.settings = settings
         self.db = db
-        self.state = ChatStateManager()
+        self.state = ChatStateManager(db=db)  # Enable preference persistence
         self.app: Application | None = None
         self.auth_filter = AllowedChatFilter(settings.telegram_allowed_chat_ids)
 

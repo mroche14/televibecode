@@ -1991,7 +1991,7 @@ async def approval_callback_handler(
 # =============================================================================
 
 
-def _get_agno_model(
+async def _get_agno_model(
     settings: Settings,
     chat_state: ChatStateManager,
     chat_id: int,
@@ -1999,6 +1999,7 @@ def _get_agno_model(
     """Get the agno model string for a chat.
 
     Uses user's selected model if set, otherwise falls back to defaults.
+    Loads user preferences from database on first access.
 
     Args:
         settings: Application settings.
@@ -2008,6 +2009,9 @@ def _get_agno_model(
     Returns:
         Model string in 'provider:model_id' format.
     """
+    # Ensure preferences are loaded from DB
+    await chat_state.ensure_loaded(chat_id)
+
     # Check if user has selected a model
     model_id, provider = chat_state.get_ai_model(chat_id)
 
@@ -2049,7 +2053,7 @@ async def natural_language_handler(
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # Classify the intent using user's selected AI model
-    model = _get_agno_model(settings, chat_state, chat_id)
+    model = await _get_agno_model(settings, chat_state, chat_id)
     result = await classify_message(text, model=model)
 
     # Handle based on intent
@@ -2569,8 +2573,8 @@ async def model_command(
         )
         return
 
-    # Set the model
-    chat_state.set_ai_model(chat_id, model.id, model.provider.value)
+    # Set the model (with persistence)
+    await chat_state.set_ai_model_persistent(chat_id, model.id, model.provider.value)
 
     await update.message.reply_text(
         f"Model set to `{model.id}`\n"
@@ -2706,8 +2710,10 @@ async def model_callback_handler(
 
         model = models[idx]
 
-        # Set the model
-        chat_state.set_ai_model(chat_id, model.id, model.provider.value)
+        # Set the model (with persistence)
+        await chat_state.set_ai_model_persistent(
+            chat_id, model.id, model.provider.value
+        )
 
         icon = _get_provider_icon(model.id)
         await query.edit_message_text(
@@ -2782,7 +2788,7 @@ async def voice_message_handler(
         chat_state = get_chat_state(context)
 
         # Classify the intent using user's selected AI model
-        model = _get_agno_model(settings, chat_state, chat_id)
+        model = await _get_agno_model(settings, chat_state, chat_id)
         result = await classify_message(transcribed_text, model=model)
 
         # Handle based on intent (same logic as natural_language_handler)

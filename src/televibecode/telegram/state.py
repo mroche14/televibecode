@@ -3,6 +3,10 @@
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from televibecode.db import Database
 
 
 @dataclass
@@ -31,6 +35,8 @@ class ChatSession:
     # AI model preference
     ai_model_id: str | None = None  # e.g., "meta-llama/llama-3.2-3b-instruct:free"
     ai_provider: str | None = None  # "openrouter" or "gemini"
+    # Track if preferences have been loaded from DB
+    _loaded_from_db: bool = False
 
 
 class MessageContextStore:
@@ -133,12 +139,28 @@ class MessageContextStore:
 
 
 class ChatStateManager:
-    """Manages per-chat state for the Telegram bot."""
+    """Manages per-chat state for the Telegram bot.
 
-    def __init__(self):
-        """Initialize the state manager."""
+    Supports optional database persistence for user preferences.
+    """
+
+    def __init__(self, db: "Database | None" = None):
+        """Initialize the state manager.
+
+        Args:
+            db: Optional database instance for preference persistence.
+        """
         self._chats: dict[int, ChatSession] = {}
         self._message_contexts = MessageContextStore()
+        self._db = db
+
+    def set_database(self, db: "Database") -> None:
+        """Set the database instance for persistence.
+
+        Args:
+            db: Database instance.
+        """
+        self._db = db
 
     def get_chat(self, chat_id: int) -> ChatSession:
         """Get or create chat state.
@@ -153,6 +175,32 @@ class ChatStateManager:
             self._chats[chat_id] = ChatSession(chat_id=chat_id)
         return self._chats[chat_id]
 
+    async def ensure_loaded(self, chat_id: int) -> ChatSession:
+        """Ensure chat preferences are loaded from database.
+
+        Call this before accessing preferences to ensure they're loaded.
+
+        Args:
+            chat_id: Telegram chat ID.
+
+        Returns:
+            ChatSession with loaded preferences.
+        """
+        chat = self.get_chat(chat_id)
+
+        # Load from DB if not yet loaded and DB is available
+        if not chat._loaded_from_db and self._db:
+            prefs = await self._db.get_user_preferences(chat_id)
+            if prefs:
+                chat.ai_model_id = prefs.get("ai_model_id")
+                chat.ai_provider = prefs.get("ai_provider")
+                chat.active_session_id = prefs.get("active_session_id")
+                if prefs.get("notifications_enabled") is False:
+                    chat.notification_level = "silent"
+            chat._loaded_from_db = True
+
+        return chat
+
     def get_active_session(self, chat_id: int) -> str | None:
         """Get active session ID for a chat.
 
@@ -166,7 +214,7 @@ class ChatStateManager:
         return chat.active_session_id
 
     def set_active_session(self, chat_id: int, session_id: str | None) -> None:
-        """Set active session for a chat.
+        """Set active session for a chat (in-memory only).
 
         Args:
             chat_id: Telegram chat ID.
@@ -175,6 +223,19 @@ class ChatStateManager:
         chat = self.get_chat(chat_id)
         chat.active_session_id = session_id
         chat.last_interaction = datetime.now(timezone.utc)
+
+    async def set_active_session_persistent(
+        self, chat_id: int, session_id: str | None
+    ) -> None:
+        """Set active session with database persistence.
+
+        Args:
+            chat_id: Telegram chat ID.
+            session_id: Session ID or None to clear.
+        """
+        self.set_active_session(chat_id, session_id)
+        if self._db:
+            await self._db.set_user_active_session(chat_id, session_id)
 
     def update_interaction(self, chat_id: int) -> None:
         """Update last interaction time for a chat.
@@ -223,7 +284,7 @@ class ChatStateManager:
     def set_ai_model(
         self, chat_id: int, model_id: str, provider: str
     ) -> None:
-        """Set AI model preference for a chat.
+        """Set AI model preference for a chat (in-memory only).
 
         Args:
             chat_id: Telegram chat ID.
@@ -234,6 +295,20 @@ class ChatStateManager:
         chat.ai_model_id = model_id
         chat.ai_provider = provider
         chat.last_interaction = datetime.now(timezone.utc)
+
+    async def set_ai_model_persistent(
+        self, chat_id: int, model_id: str, provider: str
+    ) -> None:
+        """Set AI model with database persistence.
+
+        Args:
+            chat_id: Telegram chat ID.
+            model_id: Model ID.
+            provider: Provider name.
+        """
+        self.set_ai_model(chat_id, model_id, provider)
+        if self._db:
+            await self._db.set_user_ai_model(chat_id, model_id, provider)
 
     def get_ai_model(self, chat_id: int) -> tuple[str | None, str | None]:
         """Get AI model preference for a chat.

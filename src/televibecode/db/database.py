@@ -108,6 +108,16 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- User preferences table (for Telegram users)
+CREATE TABLE IF NOT EXISTS user_preferences (
+    chat_id INTEGER PRIMARY KEY,
+    ai_model_id TEXT,
+    ai_provider TEXT,
+    active_session_id TEXT,
+    notifications_enabled INTEGER DEFAULT 1,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
@@ -839,3 +849,101 @@ class Database:
             telegram_chat_id=row["telegram_chat_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
+
+    # =========================================================================
+    # User Preferences
+    # =========================================================================
+
+    async def get_user_preferences(
+        self, chat_id: int
+    ) -> dict[str, Any] | None:
+        """Get user preferences by Telegram chat ID.
+
+        Args:
+            chat_id: Telegram chat ID.
+
+        Returns:
+            Dict with preferences or None if not found.
+        """
+        async with self.conn.execute(
+            "SELECT * FROM user_preferences WHERE chat_id = ?",
+            (chat_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return {
+                    "chat_id": row["chat_id"],
+                    "ai_model_id": row["ai_model_id"],
+                    "ai_provider": row["ai_provider"],
+                    "active_session_id": row["active_session_id"],
+                    "notifications_enabled": bool(row["notifications_enabled"]),
+                }
+            return None
+
+    async def set_user_ai_model(
+        self, chat_id: int, model_id: str, provider: str
+    ) -> None:
+        """Set user's preferred AI model.
+
+        Args:
+            chat_id: Telegram chat ID.
+            model_id: Model ID.
+            provider: Provider name ("openrouter" or "gemini").
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            INSERT INTO user_preferences (chat_id, ai_model_id, ai_provider, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                ai_model_id = excluded.ai_model_id,
+                ai_provider = excluded.ai_provider,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, model_id, provider, now),
+        )
+        await self.conn.commit()
+
+    async def set_user_active_session(
+        self, chat_id: int, session_id: str | None
+    ) -> None:
+        """Set user's active session.
+
+        Args:
+            chat_id: Telegram chat ID.
+            session_id: Session ID or None to clear.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            INSERT INTO user_preferences (chat_id, active_session_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                active_session_id = excluded.active_session_id,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, session_id, now),
+        )
+        await self.conn.commit()
+
+    async def set_user_notifications(
+        self, chat_id: int, enabled: bool
+    ) -> None:
+        """Set user's notification preference.
+
+        Args:
+            chat_id: Telegram chat ID.
+            enabled: Whether notifications are enabled.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            INSERT INTO user_preferences (chat_id, notifications_enabled, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                notifications_enabled = excluded.notifications_enabled,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, 1 if enabled else 0, now),
+        )
+        await self.conn.commit()
