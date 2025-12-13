@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -122,6 +123,37 @@ async def serve(root: Path) -> None:
             "groq_not_configured",
             message="Voice messages disabled. Set GROQ_API_KEY for transcription.",
         )
+
+    # Check for Claude Code CLI
+    claude_path = shutil.which("claude")
+    if claude_path:
+        log.info(
+            "claude_cli_found",
+            path=claude_path,
+            message=f"Claude Code CLI: {claude_path}",
+        )
+    else:
+        log.error(
+            "claude_cli_missing",
+            message="Claude Code CLI not found in PATH!",
+        )
+        print()
+        print("ERROR: 'claude' command not found.")
+        print()
+        print("TeleVibeCode requires Claude Code CLI to run instructions.")
+        print("Install it with:")
+        print()
+        print("  npm install -g @anthropic-ai/claude-code")
+        print()
+        print("Or run directly with npx:")
+        print()
+        print("  npx @anthropic-ai/claude-code")
+        print()
+        print("After installing, make sure 'claude' is in your PATH:")
+        print()
+        print("  which claude")
+        print()
+        sys.exit(1)
 
     # Initialize database
     log.info("database_connecting", path=str(settings.db_path))
