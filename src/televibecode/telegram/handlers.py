@@ -1980,19 +1980,36 @@ async def approval_callback_handler(
 # =============================================================================
 
 
-def _get_agno_model(settings: Settings) -> str:
-    """Get the agno model string from settings.
+def _get_agno_model(
+    settings: Settings,
+    chat_state: ChatStateManager,
+    chat_id: int,
+) -> str:
+    """Get the agno model string for a chat.
+
+    Uses user's selected model if set, otherwise falls back to defaults.
 
     Args:
         settings: Application settings.
+        chat_state: Chat state manager.
+        chat_id: Chat ID to get model for.
 
     Returns:
         Model string in 'provider:model_id' format.
     """
-    # Prefer Gemini (faster, free tier)
+    # Check if user has selected a model
+    model_id, provider = chat_state.get_ai_model(chat_id)
+
+    if model_id and provider:
+        # Convert to agno format
+        if provider == "gemini":
+            return f"google:{model_id}"
+        elif provider == "openrouter":
+            return f"openrouter:{model_id}"
+
+    # Fall back to defaults based on available keys
     if settings.has_gemini:
         return "google:gemini-2.0-flash"
-    # Fall back to OpenRouter free model
     if settings.has_openrouter:
         return "openrouter:meta-llama/llama-3.2-3b-instruct:free"
     # No AI available - will use pattern matching only
@@ -2020,8 +2037,8 @@ async def natural_language_handler(
     # Show typing indicator while processing
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # Classify the intent using configured AI model
-    model = _get_agno_model(settings)
+    # Classify the intent using user's selected AI model
+    model = _get_agno_model(settings, chat_state, chat_id)
     result = await classify_message(text, model=model)
 
     # Handle based on intent
@@ -2740,11 +2757,10 @@ async def voice_message_handler(
         )
 
         # Now process as if user sent this text
-        # Create a fake text message to reuse natural_language_handler logic
         chat_state = get_chat_state(context)
 
-        # Classify the intent
-        model = _get_agno_model(settings)
+        # Classify the intent using user's selected AI model
+        model = _get_agno_model(settings, chat_state, chat_id)
         result = await classify_message(transcribed_text, model=model)
 
         # Handle based on intent (same logic as natural_language_handler)
