@@ -8,7 +8,7 @@ from typing import Any
 
 # Agno is optional - only used for AI-based classification
 try:
-    from agno import Agent
+    from agno.agent import Agent
 except ImportError:
     Agent = None  # type: ignore[assignment,misc]
 
