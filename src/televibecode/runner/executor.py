@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -182,10 +183,10 @@ class JobExecutor:
             "stream-json",
         ]
 
-        # Set up environment
+        # Set up environment (inherit PATH to find claude CLI)
         env = {
             "HOME": str(Path.home()),
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "CLAUDE_CODE_ENTRYPOINT": "televibecode",
         }
 
