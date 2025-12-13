@@ -2325,7 +2325,6 @@ def _build_models_page(
 
     text = f"🤖 *AI Models* — {filter_name}\n"
     text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     # Show current model
     if current_model_id:
@@ -2334,39 +2333,37 @@ def _build_models_page(
             short_id = current_model_id[:30] + "..."
         else:
             short_id = current_model_id
-        text += f"📍 *Current:* {icon} `{short_id}`\n\n"
+        text += f"\n📍 `{short_id}`"
 
-    # Build model list
+    # Build button grid (2 per row)
     keyboard_rows = []
+    row = []
 
     for i, m in enumerate(page_models):
         global_idx = start_idx + i
         icon = _get_provider_icon(m.id)
         rank = global_idx + 1
         medal = _get_tier_medal(rank) if rank <= 3 else f"{rank}."
-        bar = _get_quality_bar(m.rank_score, max_score)
-        selected = " ✓" if m.id == current_model_id else ""
+        selected = "✓" if m.id == current_model_id else ""
 
-        # Display ID (truncated)
-        display_id = m.id
-        if len(display_id) > 32:
-            display_id = display_id[:29] + "..."
-
-        text += f"{medal} {icon} `{display_id}`{selected}\n"
-        text += f"     {bar} _{m.rank_score:.0f}pts_\n"
-
-        # Create button - use index to avoid long callback data
+        # Create button with rank + icon + short name
         parts = m.id.replace(":free", "").split("/")
         short_name = parts[-1] if len(parts) > 1 else parts[0]
-        short_name = short_name[:14]
-        label = f"{icon} {short_name}"
+        short_name = short_name[:12]
+        label = f"{medal}{icon}{short_name}{selected}"
 
         # Callback: m:s:INDEX (select by index)
         callback = f"m:s:{global_idx}"
-        keyboard_rows.append([InlineKeyboardButton(label, callback_data=callback)])
+        row.append(InlineKeyboardButton(label, callback_data=callback))
 
-    text += "\n━━━━━━━━━━━━━━━━━━━━━\n"
-    text += "💡 Tap to select model"
+        # 2 buttons per row
+        if len(row) == 2:
+            keyboard_rows.append(row)
+            row = []
+
+    # Add remaining button if odd number
+    if row:
+        keyboard_rows.append(row)
 
     # Navigation row
     nav_row = []
