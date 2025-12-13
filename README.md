@@ -177,10 +177,36 @@ TeleVibeCode creates a `.televibe/` folder in your projects root. Your repositor
 | `TELEGRAM_ALLOWED_CHAT_IDS` | **Recommended** | Comma-separated chat IDs (see Security) |
 | `OPENROUTER_API_KEY` | No* | OpenRouter API key (access to many free models) |
 | `GEMINI_API_KEY` | No* | Google Gemini API key |
+| `GROQ_API_KEY` | No | Groq API key (for voice transcription) |
 | `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MAX_CONCURRENT_JOBS` | No | Default: 3 |
+| `EXECUTOR_TYPE` | No | `subprocess` (default) or `sdk` |
 
 *Set at least one AI provider key for natural language support. Use `/models` in Telegram to see available models and `/model <id>` to switch.
+
+### Executor Types
+
+TeleVibeCode supports two executor backends:
+
+**Subprocess (default):** Spawns `claude -p <instruction>` as a subprocess. Simple and reliable.
+
+**SDK:** Uses the official [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) for native Python integration. Requires additional install:
+
+```bash
+pip install televibecode[sdk]
+# or: uv add televibecode[sdk]
+```
+
+Then set in `.env`:
+```bash
+EXECUTOR_TYPE=sdk
+```
+
+SDK benefits:
+- Native Python hooks for approval gating
+- Clean interrupt support (`client.interrupt()`)
+- Structured message types (no JSON parsing)
+- Session continuity for follow-up instructions
 
 ### Security
 

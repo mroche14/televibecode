@@ -91,6 +91,17 @@ class Settings(BaseSettings):
         description="Maximum concurrent job executions",
     )
 
+    # Executor type
+    executor_type: Literal["subprocess", "sdk"] = Field(
+        default="subprocess",
+        description="Job executor: 'subprocess' (default) or 'sdk'",
+    )
+
+    @property
+    def use_sdk_executor(self) -> bool:
+        """Check if SDK executor should be used."""
+        return self.executor_type == "sdk"
+
     @field_validator("televibe_root", mode="before")
     @classmethod
     def resolve_root(cls, v: str | Path) -> Path:

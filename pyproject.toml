@@ -27,6 +27,12 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
+sdk = [
+    "claude-agent-sdk>=0.1.0",
+]
+all = [
+    "televibecode[dev,sdk]",
+]
 
 [project.scripts]
 televibecode = "televibecode.main:main"
@@ -80,6 +86,11 @@ disable_error_code = ["arg-type", "union-attr"]
 module = "televibecode.config"
 # pydantic-settings constructor patterns
 disable_error_code = ["call-arg"]
+
+[[tool.mypy.overrides]]
+module = "televibecode.runner.sdk_executor"
+# claude-agent-sdk doesn't have proper type stubs
+disable_error_code = ["attr-defined", "import-untyped", "name-defined"]
 
 [dependency-groups]
 dev = [
