@@ -1,5 +1,9 @@
 # TeleVibeCode
 
+<p align="center">
+  <img src="docs/hero.png" alt="TeleVibeCode - Command your AI coding swarm from anywhere" width="600">
+</p>
+
 Remote orchestration harness for managing multiple Claude Code + SuperClaude sessions via Telegram.
 
 ## Overview
