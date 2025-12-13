@@ -192,12 +192,16 @@ class IntentClassifier:
         IntentType.HELP: "/help",
     }
 
-    def __init__(self, use_ai: bool = True, model: str = "claude-sonnet-4-20250514"):
+    def __init__(
+        self,
+        use_ai: bool = True,
+        model: str = "openrouter:meta-llama/llama-3.2-3b-instruct:free",
+    ):
         """Initialize the classifier.
 
         Args:
             use_ai: Whether to use AI for complex classification.
-            model: Model to use for AI classification.
+            model: Model in format 'provider:model_id' (e.g. 'openrouter:model_id').
         """
         self.use_ai = use_ai
         self.model = model
@@ -379,31 +383,42 @@ class IntentClassifier:
 
 # Global classifier instance
 _classifier: IntentClassifier | None = None
+_classifier_model: str | None = None
 
 
-def get_classifier(use_ai: bool = True) -> IntentClassifier:
+def get_classifier(
+    use_ai: bool = True,
+    model: str = "openrouter:meta-llama/llama-3.2-3b-instruct:free",
+) -> IntentClassifier:
     """Get the global intent classifier.
 
     Args:
         use_ai: Whether to enable AI classification.
+        model: Model in format 'provider:model_id'.
 
     Returns:
         IntentClassifier instance.
     """
-    global _classifier
-    if _classifier is None:
-        _classifier = IntentClassifier(use_ai=use_ai)
+    global _classifier, _classifier_model
+    # Recreate if model changed
+    if _classifier is None or _classifier_model != model:
+        _classifier = IntentClassifier(use_ai=use_ai, model=model)
+        _classifier_model = model
     return _classifier
 
 
-async def classify_message(text: str) -> ParsedIntent:
+async def classify_message(
+    text: str,
+    model: str = "openrouter:meta-llama/llama-3.2-3b-instruct:free",
+) -> ParsedIntent:
     """Classify a message using the global classifier.
 
     Args:
         text: Message text.
+        model: Model in format 'provider:model_id'.
 
     Returns:
         ParsedIntent result.
     """
-    classifier = get_classifier()
+    classifier = get_classifier(model=model)
     return await classifier.classify(text)

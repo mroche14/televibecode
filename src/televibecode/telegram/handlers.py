@@ -1979,6 +1979,25 @@ async def approval_callback_handler(
 # =============================================================================
 
 
+def _get_agno_model(settings: Settings) -> str:
+    """Get the agno model string from settings.
+
+    Args:
+        settings: Application settings.
+
+    Returns:
+        Model string in 'provider:model_id' format.
+    """
+    # Prefer Gemini (faster, free tier)
+    if settings.has_gemini:
+        return "google:gemini-2.0-flash"
+    # Fall back to OpenRouter free model
+    if settings.has_openrouter:
+        return "openrouter:meta-llama/llama-3.2-3b-instruct:free"
+    # No AI available - will use pattern matching only
+    return "openrouter:meta-llama/llama-3.2-3b-instruct:free"
+
+
 async def natural_language_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1995,12 +2014,14 @@ async def natural_language_handler(
 
     chat_id = update.effective_chat.id
     chat_state = get_chat_state(context)
+    settings: Settings = context.bot_data["settings"]
 
     # Show typing indicator while processing
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # Classify the intent
-    result = await classify_message(text)
+    # Classify the intent using configured AI model
+    model = _get_agno_model(settings)
+    result = await classify_message(text, model=model)
 
     # Handle based on intent
     if result.intent == IntentType.UNKNOWN:
