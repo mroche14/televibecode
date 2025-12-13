@@ -335,6 +335,16 @@ CREATE TABLE jobs (
     finished_at TEXT
 );
 
+-- User preferences table (for Telegram users)
+CREATE TABLE user_preferences (
+    chat_id INTEGER PRIMARY KEY,
+    ai_model_id TEXT,
+    ai_provider TEXT,
+    active_session_id TEXT,
+    notifications_enabled INTEGER DEFAULT 1,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX idx_sessions_project ON sessions(project_id);
 CREATE INDEX idx_sessions_state ON sessions(state);
@@ -344,3 +354,16 @@ CREATE INDEX idx_tasks_session ON tasks(session_id);
 CREATE INDEX idx_jobs_session ON jobs(session_id);
 CREATE INDEX idx_jobs_status ON jobs(status);
 ```
+
+## User Preferences
+
+Stores per-user settings for Telegram users. Persists across bot restarts.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `chat_id` | integer | Telegram chat ID (primary key) |
+| `ai_model_id` | string? | Selected AI model ID |
+| `ai_provider` | string? | Model provider ("openrouter" or "gemini") |
+| `active_session_id` | string? | Last active session |
+| `notifications_enabled` | boolean | Whether notifications are enabled |
+| `updated_at` | datetime | Last update timestamp |

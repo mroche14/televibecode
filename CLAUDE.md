@@ -48,14 +48,20 @@ src/televibecode/
 ├── db/
 │   ├── models.py        # Pydantic data models
 │   └── database.py      # SQLite async CRUD
+├── ai/
+│   ├── models.py        # AI model definitions
+│   ├── classify.py      # Intent classification
+│   └── transcription.py # Voice transcription (Groq Whisper)
 ├── orchestrator/
 │   ├── server.py        # MCP server
 │   └── tools/           # MCP tool handlers
 ├── telegram/
 │   ├── bot.py           # Bot setup
-│   └── handlers.py      # Command handlers
+│   ├── handlers.py      # Command handlers
+│   └── state.py         # Per-chat state management
 └── runner/
-    └── executor.py      # Job execution
+    ├── executor.py      # Job execution (subprocess)
+    └── sdk_executor.py  # Job execution (Claude Agent SDK)
 ```
 
 ## Architecture

@@ -432,6 +432,8 @@ Use `/models` to browse available AI models and `/model` to switch.
 - `/model` - Show currently selected model
 - `/model <id>` - Switch to a specific model
 
+**Persistence:** Your selected model is saved to the database and persists across bot restarts.
+
 **Supported Providers:**
 - **Gemini**: Requires `GEMINI_API_KEY`
 - **OpenRouter**: Requires `OPENROUTER_API_KEY` (access to many free and paid models)
