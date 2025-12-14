@@ -2597,8 +2597,30 @@ async def _monitor_job_completion(
 # =============================================================================
 
 
+def _get_provider_icon_by_enum(provider) -> str:
+    """Get icon for AI provider (by Provider enum).
+
+    Icons:
+        💎 = Gemini (Google)
+        🌐 = OpenRouter
+        ⚡ = Groq
+        🧠 = Cerebras
+    """
+    from televibecode.ai.models import Provider
+
+    if provider == Provider.GEMINI:
+        return "💎"
+    if provider == Provider.OPENROUTER:
+        return "🌐"
+    if provider == Provider.GROQ:
+        return "⚡"
+    if provider == Provider.CEREBRAS:
+        return "🧠"
+    return "🤖"
+
+
 def _get_provider_icon(model_id: str) -> str:
-    """Get icon for model provider."""
+    """Get icon for model provider (by model ID string - legacy)."""
     model_lower = model_id.lower()
     if "grok" in model_lower or "x-ai" in model_lower:
         return "⚡"  # Grok
@@ -2692,15 +2714,15 @@ def _build_models_page(
 
     text = f"🤖 *AI Models* — {filter_name}\n"
     text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n"
+    text += "💎Gemini 🌐OpenRouter ⚡Groq 🧠Cerebras\n"
 
     # Show test status
     if test_results:
         tested_count = len(test_results)
-        text += f"🧪 {tested_count} models tested\n"
+        text += f"🧪 {tested_count} tested | 🔧=tools ❌=no tools\n"
 
     # Show current model
     if current_model_id:
-        icon = _get_provider_icon(current_model_id)
         if len(current_model_id) > 30:
             short_id = current_model_id[:30] + "..."
         else:
@@ -2713,7 +2735,8 @@ def _build_models_page(
 
     for i, m in enumerate(page_models):
         global_idx = start_idx + i
-        icon = _get_provider_icon(m.id)
+        # Use provider enum for icon (💎=Gemini, 🌐=OpenRouter, ⚡=Groq, 🧠=Cerebras)
+        provider_icon = _get_provider_icon_by_enum(m.provider)
         selected = " ✓" if m.id == current_model_id else ""
 
         # Tool support indicator
@@ -2727,10 +2750,29 @@ def _build_models_page(
             # Heuristic says no
             tool_icon = ""
 
-        # Create button with icon + model name
-        parts = m.id.replace(":free", "").split("/")
-        short_name = parts[-1] if len(parts) > 1 else parts[0]
-        label = f"{icon}{tool_icon} {short_name}{selected}"
+        # Create button with provider icon + model name
+        # For OpenRouter: keep subprovider (e.g., "meta-llama/llama-3.3")
+        # For others: just use the model ID
+        clean_id = m.id.replace(":free", "")
+        if m.provider.value == "openrouter":
+            # Keep org/model format, just shorten the model name part if too long
+            parts = clean_id.split("/")
+            if len(parts) == 2:
+                org, model = parts
+                # Shorten org if needed
+                if len(org) > 10:
+                    org = org[:8] + ".."
+                # Shorten model if needed
+                if len(model) > 18:
+                    model = model[:16] + ".."
+                short_name = f"{org}/{model}"
+            else:
+                short_name = clean_id[:26] if len(clean_id) > 26 else clean_id
+        else:
+            # For Gemini/Groq/Cerebras: just use model ID
+            short_name = clean_id[:26] if len(clean_id) > 26 else clean_id
+
+        label = f"{provider_icon}{tool_icon} {short_name}{selected}"
 
         # Pad with spaces to push text left (workaround for centered buttons)
         padding = button_width - len(label)
