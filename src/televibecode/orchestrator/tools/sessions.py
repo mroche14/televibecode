@@ -109,13 +109,14 @@ async def create_session(
     if not project:
         raise ValueError(f"Project '{project_id}' not found")
 
-    # Generate session ID
-    session_number = await db.get_next_session_number()
-    session_id = f"S{session_number}"
+    # Generate session ID: project_YYYYMMDD_HHMMSS
+    from datetime import datetime
+    now = datetime.now()
+    session_id = f"{project_id}_{now.strftime('%Y%m%d_%H%M%S')}"
 
     # Generate branch name if not provided
     if not branch:
-        branch = generate_session_branch(project_id, session_number, display_name)
+        branch = f"televibe/{session_id}"
 
     # Set up worktree path
     workspace_path = settings.workspaces_dir / session_id

@@ -85,6 +85,8 @@ The bot uses a lightweight LLM for understanding natural language. Free options:
 
 - **Gemini** (recommended): https://aistudio.google.com/apikey
 - **OpenRouter**: https://openrouter.ai (free models available)
+- **Groq**: https://console.groq.com/keys (ultra-fast inference + voice transcription)
+- **Cerebras**: https://cloud.cerebras.ai (fastest inference available)
 
 > **OpenRouter Free Models**: To use free models on OpenRouter, you must enable data sharing in your [privacy settings](https://openrouter.ai/settings/privacy):
 > - Enable "Free endpoints that may train on inputs" - allows providers to use prompts for training
@@ -103,9 +105,11 @@ uv tool install televibecode
 cat > ~/projects/.env << 'EOF'
 TELEGRAM_BOT_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TELEGRAM_ALLOWED_CHAT_IDS=YOUR_CHAT_ID_HERE
-# AI providers (set one or both)
-OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxx
+# AI providers (set at least one)
 GEMINI_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxx
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CEREBRAS_API_KEY=csk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 EOF
 
 # Run (points at your existing projects folder)
@@ -175,14 +179,24 @@ TeleVibeCode creates a `.televibe/` folder in your projects root. Your repositor
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | **Recommended** | Comma-separated chat IDs (see Security) |
-| `OPENROUTER_API_KEY` | No* | OpenRouter API key (access to many free models) |
 | `GEMINI_API_KEY` | No* | Google Gemini API key |
-| `GROQ_API_KEY` | No | Groq API key (for voice transcription) |
+| `OPENROUTER_API_KEY` | No* | OpenRouter API key (access to many free models) |
+| `GROQ_API_KEY` | No* | Groq API key (fast inference + voice transcription) |
+| `CEREBRAS_API_KEY` | No* | Cerebras API key (fastest inference) |
 | `LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MAX_CONCURRENT_JOBS` | No | Default: 3 |
 | `EXECUTOR_TYPE` | No | `subprocess` (default) or `sdk` |
 
 *Set at least one AI provider key for natural language support. Use `/models` in Telegram to see available models and `/model <id>` to switch.
+
+**AI Providers Overview:**
+
+| Provider | Speed | Free Tier | Best For |
+|----------|-------|-----------|----------|
+| Gemini | Fast | 1M tokens/day | General use, long context |
+| OpenRouter | Varies | Many free models | Model variety |
+| Groq | Ultra-fast | 250K tokens/min | Speed, voice transcription |
+| Cerebras | Fastest | Free tier available | Maximum speed |
 
 ### Executor Types
 

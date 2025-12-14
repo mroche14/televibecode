@@ -22,6 +22,7 @@ from televibecode.telegram.handlers import (
     cancel_command,
     claim_task_command,
     close_session_command,
+    command_callback_handler,
     handle_reply_message,
     help_command,
     jobs_command,
@@ -30,8 +31,11 @@ from televibecode.telegram.handlers import (
     models_command,
     natural_language_handler,
     new_session_command,
+    newproject_callback_handler,
+    newproject_command,
     next_tasks_command,
     projects_command,
+    reset_command,
     run_command,
     scan_command,
     session_callback_handler,
@@ -44,7 +48,9 @@ from televibecode.telegram.handlers import (
     task_callback_handler,
     tasks_command,
     use_session_command,
+    voice_confirm_callback_handler,
     voice_message_handler,
+    agent_callback_handler,
 )
 from televibecode.telegram.state import ChatStateManager
 
@@ -149,6 +155,7 @@ class TeleVibeBot:
             BotCommand("help", "Show available commands"),
             BotCommand("projects", "List registered projects"),
             BotCommand("scan", "Scan for new projects"),
+            BotCommand("newproject", "Create a new project"),
             BotCommand("sessions", "List active sessions"),
             BotCommand("new", "Create a new session"),
             BotCommand("use", "Switch to a session"),
@@ -166,6 +173,7 @@ class TeleVibeBot:
             BotCommand("approvals", "List pending approvals"),
             BotCommand("models", "List available AI models"),
             BotCommand("model", "Switch AI model"),
+            BotCommand("reset", "Clear AI conversation history"),
         ]
         await self.app.bot.set_my_commands(commands)
         log.info("bot_commands_menu_set", count=len(commands))
@@ -178,10 +186,14 @@ class TeleVibeBot:
         # Basic commands
         self.app.add_handler(CommandHandler("start", start_command, filters=auth))
         self.app.add_handler(CommandHandler("help", help_command, filters=auth))
+        self.app.add_handler(CommandHandler("reset", reset_command, filters=auth))
 
         # Project commands
         self.app.add_handler(CommandHandler("projects", projects_command, filters=auth))
         self.app.add_handler(CommandHandler("scan", scan_command, filters=auth))
+        self.app.add_handler(
+            CommandHandler("newproject", newproject_command, filters=auth)
+        )
 
         # Session commands
         self.app.add_handler(CommandHandler("sessions", sessions_command, filters=auth))
@@ -246,6 +258,34 @@ class TeleVibeBot:
             CallbackQueryHandler(
                 self._auth_callback_wrapper(model_callback_handler),
                 pattern="^m:",
+            )
+        )
+        # New project callback handler (for GitHub/GitLab selection)
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(newproject_callback_handler),
+                pattern="^newproj:",
+            )
+        )
+        # Command suggestion callback handler (for natural language suggestions)
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(command_callback_handler),
+                pattern="^cmd:",
+            )
+        )
+        # Voice transcription confirmation handler
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(voice_confirm_callback_handler),
+                pattern="^voice:",
+            )
+        )
+        # Agent confirmation handler (Yes/No for write operations)
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(agent_callback_handler),
+                pattern="^agent:",
             )
         )
 

@@ -2,6 +2,7 @@
 
 import contextlib
 import re
+import subprocess
 from pathlib import Path
 
 from git import InvalidGitRepositoryError, Repo
@@ -261,3 +262,224 @@ async def unregister_project(db: Database, project_id: str) -> dict:
         "project_id": project_id,
         "message": f"Project '{project.name}' unregistered",
     }
+
+
+def validate_project_name(name: str) -> str | None:
+    """Validate project name.
+
+    Args:
+        name: Proposed project name.
+
+    Returns:
+        Error message if invalid, None if valid.
+    """
+    if not name:
+        return "Project name cannot be empty"
+    if len(name) > 64:
+        return "Project name too long (max 64 characters)"
+    if not re.match(r"^[a-z][a-z0-9-]*$", name):
+        return "Name must be lowercase letters, numbers, dashes only"
+    if name.startswith("-") or name.endswith("-"):
+        return "Name cannot start or end with a dash"
+    if "--" in name:
+        return "Name cannot contain consecutive dashes"
+    return None
+
+
+async def create_project(
+    db: Database,
+    projects_root: Path,
+    name: str,
+    remote: str | None = None,
+) -> dict:
+    """Create a new project from scratch.
+
+    Args:
+        db: Database instance.
+        projects_root: Root directory for projects.
+        name: Project name (lowercase, alphanumeric, dashes).
+        remote: Optional remote to create ("github" or "gitlab").
+
+    Returns:
+        Created project dictionary with remote_url if created.
+
+    Raises:
+        ValueError: If name invalid, directory exists, or remote creation fails.
+    """
+    # Validate name
+    error = validate_project_name(name)
+    if error:
+        raise ValueError(error)
+
+    project_path = projects_root / name
+
+    # Check if already exists
+    if project_path.exists():
+        raise ValueError(f"Directory already exists: {project_path}")
+
+    # Check if already registered
+    existing = await db.get_project(name)
+    if existing:
+        raise ValueError(f"Project '{name}' already registered")
+
+    # Create directory
+    project_path.mkdir(parents=True)
+
+    try:
+        # Initialize git repo with main branch
+        repo = Repo.init(project_path, initial_branch="main")
+
+        # Create README.md
+        readme = project_path / "README.md"
+        readme.write_text(f"# {name}\n\nA new project.\n")
+
+        # Create .gitignore
+        gitignore = project_path / ".gitignore"
+        gitignore.write_text(
+            "# IDE\n"
+            ".idea/\n"
+            ".vscode/\n"
+            "*.swp\n"
+            "*.swo\n"
+            "\n"
+            "# Python\n"
+            "__pycache__/\n"
+            "*.pyc\n"
+            ".venv/\n"
+            "venv/\n"
+            ".env\n"
+            "\n"
+            "# Node\n"
+            "node_modules/\n"
+            "\n"
+            "# OS\n"
+            ".DS_Store\n"
+            "Thumbs.db\n"
+        )
+
+        # Initial commit
+        repo.index.add(["README.md", ".gitignore"])
+        repo.index.commit("Initial commit")
+
+        # Create remote if requested
+        remote_url = None
+        if remote:
+            remote_url = _create_remote(project_path, name, remote)
+            if remote_url:
+                repo.create_remote("origin", remote_url)
+                # Push to remote
+                repo.remotes.origin.push("main", set_upstream=True)
+
+        # Register in database
+        project = Project(
+            project_id=name,
+            name=name,
+            path=str(project_path),
+            remote_url=remote_url,
+            default_branch="main",
+            backlog_enabled=False,
+            backlog_path=None,
+        )
+
+        await db.create_project(project)
+
+        return {
+            "project_id": name,
+            "name": name,
+            "path": str(project_path),
+            "remote_url": remote_url,
+            "default_branch": "main",
+            "message": f"Project '{name}' created successfully",
+        }
+
+    except Exception as e:
+        # Clean up on failure
+        import shutil
+
+        if project_path.exists():
+            shutil.rmtree(project_path)
+        raise ValueError(f"Failed to create project: {e}") from e
+
+
+def _create_remote(project_path: Path, name: str, remote: str) -> str | None:
+    """Create a remote repository on GitHub or GitLab.
+
+    Args:
+        project_path: Local project path.
+        name: Repository name.
+        remote: "github" or "gitlab".
+
+    Returns:
+        Remote URL if successful, None if failed.
+
+    Raises:
+        ValueError: If CLI not available or creation fails.
+    """
+    if remote == "github":
+        # Check if gh CLI is available
+        result = subprocess.run(
+            ["which", "gh"], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            raise ValueError(
+                "GitHub CLI (gh) not found. Install with: brew install gh"
+            )
+
+        # Create repo
+        result = subprocess.run(
+            ["gh", "repo", "create", name, "--private", "--source", str(project_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=project_path,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"Failed to create GitHub repo: {result.stderr}")
+
+        # Get repo URL
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "url", "-q", ".url"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=project_path,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+        return None
+
+    elif remote == "gitlab":
+        # Check if glab CLI is available
+        result = subprocess.run(
+            ["which", "glab"], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            raise ValueError(
+                "GitLab CLI (glab) not found. Install with: brew install glab"
+            )
+
+        # Create repo
+        result = subprocess.run(
+            ["glab", "repo", "create", name, "--private"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=project_path,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"Failed to create GitLab repo: {result.stderr}")
+
+        # Get repo URL from output (glab outputs it)
+        # Format: "Created repository user/name on GitLab: https://..."
+        for line in result.stdout.split("\n"):
+            if "https://" in line or "git@" in line:
+                # Extract URL
+                parts = line.split()
+                for part in parts:
+                    if part.startswith("https://") or part.startswith("git@"):
+                        return part.rstrip(".")
+        return None
+
+    else:
+        raise ValueError(f"Unknown remote type: {remote}. Use 'github' or 'gitlab'.")

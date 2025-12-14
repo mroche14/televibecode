@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import shutil
 import signal
 import sys
@@ -16,6 +17,56 @@ from televibecode.config import load_settings
 from televibecode.db import Database
 from televibecode.orchestrator import create_mcp_server
 from televibecode.telegram import create_bot
+
+# ANSI color codes
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+
+# Colors
+CYAN = "\033[36m"
+MAGENTA = "\033[35m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+WHITE = "\033[37m"
+RED = "\033[31m"
+
+# Bright colors
+BRIGHT_CYAN = "\033[96m"
+BRIGHT_MAGENTA = "\033[95m"
+BRIGHT_YELLOW = "\033[93m"
+BRIGHT_GREEN = "\033[92m"
+BRIGHT_BLUE = "\033[94m"
+
+
+def print_banner() -> None:  # noqa: E501
+    """Print the startup banner with blue-to-violet gradient."""
+    r = RESET
+    # Gradient from blue (39) to violet (99): 39 -> 63 -> 62 -> 98 -> 99
+    c1 = "\033[38;5;39m"   # Blue
+    c2 = "\033[38;5;63m"
+    c3 = "\033[38;5;62m"
+    c4 = "\033[38;5;98m"
+    c5 = "\033[38;5;99m"   # Violet
+
+    print()
+    print(f"  {c1}████████╗███████╗██╗     ███████╗██╗   ██╗██╗██████╗ ███████╗{r}")
+    print(f"  {c1}╚══██╔══╝██╔════╝██║     ██╔════╝██║   ██║██║██╔══██╗██╔════╝{r}")
+    print(f"  {c2}   ██║   █████╗  ██║     █████╗  ██║   ██║██║██████╔╝█████╗  {r}")
+    print(f"  {c2}   ██║   ██╔══╝  ██║     ██╔══╝  ╚██╗ ██╔╝██║██╔══██╗██╔══╝  {r}")
+    print(f"  {c3}   ██║   ███████╗███████╗███████╗ ╚████╔╝ ██║██████╔╝███████╗{r}")
+    print(f"  {c3}   ╚═╝   ╚══════╝╚══════╝╚══════╝  ╚═══╝  ╚═╝╚═════╝ ╚══════╝{r}")
+    print()
+    print(f"  {c4}                    ██████╗ ██████╗ ██████╗ ███████╗{r}")
+    print(f"  {c4}                    ██╔════╝██╔═══██╗██╔══██╗██╔════╝{r}")
+    print(f"  {c5}                    ██║     ██║   ██║██║  ██║█████╗  {r}")
+    print(f"  {c5}                    ██║     ██║   ██║██║  ██║██╔══╝  {r}")
+    print(f"  {c5}                    ╚██████╗╚██████╔╝██████╔╝███████╗{r}")
+    print(f"  {c5}                     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝{r}")
+    print()
+    print(f"  {DIM}Remote AI coding orchestration via Telegram  v{__version__}{r}")
+    print()
 
 
 def configure_logging(level: str) -> None:
@@ -57,6 +108,10 @@ async def serve(root: Path) -> None:
         env_file = root / ".televibe" / ".env"
     load_dotenv(env_file if env_file.exists() else None)
 
+    # Set GOOGLE_API_KEY alias for agno (it expects GOOGLE_API_KEY, not GEMINI_API_KEY)
+    if os.getenv("GEMINI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
+        os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
+
     # Load settings
     settings = load_settings(root)
     settings.ensure_dirs()
@@ -64,13 +119,8 @@ async def serve(root: Path) -> None:
     configure_logging(settings.log_level)
     log = structlog.get_logger()
 
-    # Startup banner
-    print()
-    print("=" * 60)
-    print(f"  TeleVibeCode v{__version__}")
-    print("  Remote orchestration for Claude Code via Telegram")
-    print("=" * 60)
-    print()
+    # Print stylish startup banner
+    print_banner()
 
     log.info(
         "config_loaded",
@@ -98,6 +148,10 @@ async def serve(root: Path) -> None:
         ai_providers.append("Gemini")
     if settings.has_openrouter:
         ai_providers.append("OpenRouter")
+    if settings.has_groq:
+        ai_providers.append("Groq")
+    if settings.has_cerebras:
+        ai_providers.append("Cerebras")
 
     if ai_providers:
         log.info(
@@ -109,7 +163,7 @@ async def serve(root: Path) -> None:
         log.warning(
             "ai_providers_missing",
             message="No AI providers configured. "
-            "Set GEMINI_API_KEY or OPENROUTER_API_KEY.",
+            "Set GEMINI_API_KEY, OPENROUTER_API_KEY, or GROQ_API_KEY.",
         )
 
     # Log Groq (audio transcription) status
@@ -189,8 +243,20 @@ async def serve(root: Path) -> None:
     assert bot.app.updater is not None, "Bot updater not initialized"
     await bot.app.updater.start_polling(drop_pending_updates=True)
 
-    # Ready message
+    # Ready message with style (blue-violet theme)
+    violet = "\033[38;5;99m"
     print()
+    print(f"{DIM}{'─' * 70}{RESET}")
+    print(f"  {BRIGHT_GREEN}✓{RESET} {BOLD}TeleVibeCode is running!{RESET}")
+    print(f"{DIM}{'─' * 70}{RESET}")
+    print()
+    print(
+        f"  {BRIGHT_BLUE}📱{RESET} Open Telegram and send "
+        f"{BOLD}/help{RESET} to your bot to get started"
+    )
+    print(f"  {violet}⌨️ {RESET} Press {BOLD}Ctrl+C{RESET} to stop the server")
+    print()
+
     log.info(
         "server_ready",
         message="TeleVibeCode is running!",
@@ -198,10 +264,6 @@ async def serve(root: Path) -> None:
         database="connected",
         ai_providers=ai_providers or ["none"],
     )
-    print()
-    print("  Open Telegram and send /help to your bot to get started.")
-    print("  Press Ctrl+C to stop the server.")
-    print()
 
     # Wait for shutdown signal
     await shutdown_event.wait()

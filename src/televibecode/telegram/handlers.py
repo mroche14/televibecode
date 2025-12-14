@@ -1,12 +1,37 @@
 """Telegram command handlers."""
 
+import contextlib
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from televibecode.ai import IntentType, classify_message, transcribe_telegram_voice
+from televibecode.ai import transcribe_telegram_voice
+from televibecode.ai.command_suggester import reset_chat_history, suggest_commands
 from televibecode.ai.models import ModelRegistry
+from televibecode.ai.tool_tester import (
+    get_tested_models,
+    load_results,
+    needs_testing,
+    run_full_test,
+)
+
+# Conversational agent (optional but preferred)
+try:
+    from televibecode.ai.agent import (
+        TeleVibeAgent,
+        get_agent,
+        get_pending_action,
+        clear_pending_action,
+    )
+    AGENT_AVAILABLE = True
+except ImportError:
+    AGENT_AVAILABLE = False
+    TeleVibeAgent = None
+    get_agent = None
+    get_pending_action = None
+    clear_pending_action = None
 from televibecode.config import Settings
 from televibecode.db import (
     Database,
@@ -54,6 +79,12 @@ __all__ = [
     "models_command",
     "model_command",
     "model_callback_handler",
+    "command_callback_handler",
+    "voice_confirm_callback_handler",
+    "newproject_command",
+    "newproject_callback_handler",
+    "reset_command",
+    "agent_callback_handler",
 ]
 
 
@@ -243,11 +274,30 @@ Reply to any bot message to send instructions to that session's context.
 /models - List available AI models (ranked)
 /model <id> - Switch to a specific model
 
-*Help*
+*Other*
+/reset - Clear AI conversation history
 /help - Show this message
     """.strip()
 
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /reset command - clears AI conversation history."""
+    chat_id = update.effective_chat.id
+
+    # Reset the command suggester memory
+    success = reset_chat_history(chat_id)
+
+    if success:
+        await update.message.reply_text(
+            "AI conversation history cleared.\n\n"
+            "The command suggester will start fresh without previous context."
+        )
+    else:
+        await update.message.reply_text(
+            "Failed to clear conversation history. Please try again."
+        )
 
 
 async def projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -297,6 +347,180 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"Found {result['found']} repositories.\n"
             f"All already registered or no new projects found."
         )
+
+
+async def newproject_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /newproject command - create a new project from scratch."""
+    args = context.args
+    chat_id = update.effective_chat.id
+
+    if not args:
+        await update.message.reply_text(
+            "*Create New Project*\n\n"
+            "Usage: `/newproject <name>`\n\n"
+            "Name must be:\n"
+            "• Lowercase letters, numbers, dashes\n"
+            "• Start with a letter\n"
+            "• No spaces or special characters\n\n"
+            "Example: `/newproject my-app`",
+            parse_mode="Markdown",
+        )
+        return
+
+    name = args[0].lower()
+
+    # Validate name first
+    error = projects.validate_project_name(name)
+    if error:
+        await update.message.reply_text(f"❌ Invalid name: {error}")
+        return
+
+    # Check if already exists
+    settings: Settings = context.bot_data["settings"]
+    project_path = settings.televibe_root / name
+
+    if project_path.exists():
+        await update.message.reply_text(
+            f"❌ Directory already exists: `{project_path}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    db = get_db(context)
+    existing = await db.get_project(name)
+    if existing:
+        await update.message.reply_text(
+            f"❌ Project `{name}` already registered.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Store pending project name and show remote options
+    if "pending_projects" not in context.bot_data:
+        context.bot_data["pending_projects"] = {}
+    context.bot_data["pending_projects"][chat_id] = name
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🐙 GitHub", callback_data=f"newproj:github:{name}"
+                ),
+                InlineKeyboardButton(
+                    "🦊 GitLab", callback_data=f"newproj:gitlab:{name}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⏭️ Skip (local only)", callback_data=f"newproj:skip:{name}"
+                ),
+            ],
+            [
+                InlineKeyboardButton("❌ Cancel", callback_data="newproj:cancel"),
+            ],
+        ]
+    )
+
+    await update.message.reply_text(
+        f"📂 Creating project `{name}`\n\n"
+        "Create a remote repository?",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+async def newproject_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle newproject button callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("newproj:"):
+        return
+
+    parts = data.split(":", 2)
+    if len(parts) < 2:
+        return
+
+    action = parts[1]
+    chat_id = update.effective_chat.id
+
+    if action == "cancel":
+        # Clean up
+        if "pending_projects" in context.bot_data:
+            context.bot_data["pending_projects"].pop(chat_id, None)
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text("Cancelled.")
+        return
+
+    if len(parts) < 3:
+        return
+
+    name = parts[2]
+    remote = None if action == "skip" else action
+
+    # Show progress
+    with contextlib.suppress(BadRequest):
+        remote_text = f" + {action.title()} remote" if remote else ""
+        await query.edit_message_text(f"⏳ Creating `{name}`{remote_text}...")
+
+    db = get_db(context)
+    settings: Settings = context.bot_data["settings"]
+    chat_state = get_chat_state(context)
+
+    try:
+        # Create the project
+        result = await projects.create_project(
+            db=db,
+            projects_root=settings.televibe_root,
+            name=name,
+            remote=remote,
+        )
+
+        # Create initial session
+        from televibecode.orchestrator.tools import sessions
+
+        session_result = await sessions.create_session(
+            db=db,
+            settings=settings,
+            project_id=name,
+        )
+
+        # Set as active session
+        chat_state.set_active_session(chat_id, session_result["session_id"])
+
+        # Build success message
+        msg_lines = [
+            "✅ *Project created!*\n",
+            f"📂 `{result['path']}`",
+        ]
+        if result.get("remote_url"):
+            msg_lines.append(f"🌐 {result['remote_url']}")
+        msg_lines.extend(
+            [
+                f"\n🔹 Session `{session_result['session_id']}` created",
+                f"🌿 Branch: `{session_result['branch']}`",
+                "\nReady for instructions!",
+            ]
+        )
+
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text(
+                "\n".join(msg_lines), parse_mode="Markdown"
+            )
+
+    except ValueError as e:
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text(f"❌ Error: {e}")
+
+    finally:
+        # Clean up pending
+        if "pending_projects" in context.bot_data:
+            context.bot_data["pending_projects"].pop(chat_id, None)
 
 
 async def sessions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -672,27 +896,12 @@ async def handle_reply_message(
     # Get the text from the reply
     text = update.message.text or ""
 
-    # For now, just acknowledge and show session context
-    # In Phase 4, this will queue a job
-    project = await db.get_project(session.project_id)
-    project_name = project.name if project else session.project_id
+    if not text.strip():
+        await update.message.reply_text("Please provide an instruction.")
+        return
 
-    response = (
-        f"Session `{session_id}` ({project_name})\n"
-        f"🌿 Branch: `{session.branch}`\n\n"
-        f"Received: {text[:100]}{'...' if len(text) > 100 else ''}\n\n"
-        f"_Job execution coming in Phase 4._"
-    )
-
-    await send_with_context(
-        update,
-        context,
-        response,
-        session_id=session_id,
-        project_id=session.project_id,
-        message_type="session",
-        parse_mode="Markdown",
-    )
+    # Run the instruction in the session
+    await _run_as_instruction(update, context, session_id, text)
 
 
 async def session_callback_handler(
@@ -2021,12 +2230,21 @@ async def _get_agno_model(
             return f"google:{model_id}"
         elif provider == "openrouter":
             return f"openrouter:{model_id}"
+        elif provider == "groq":
+            return f"groq:{model_id}"
+        elif provider == "cerebras":
+            return f"cerebras:{model_id}"
 
     # Fall back to defaults based on available keys
+    # Prefer Cerebras (fastest), then Groq, then OpenRouter, then Gemini
+    if settings.has_cerebras:
+        return "cerebras:llama-3.3-70b"
+    if settings.has_groq:
+        return "groq:llama-3.3-70b-versatile"
+    if settings.has_openrouter:
+        return "openrouter:meta-llama/llama-3.3-70b-instruct:free"
     if settings.has_gemini:
         return "google:gemini-2.0-flash"
-    if settings.has_openrouter:
-        return "openrouter:meta-llama/llama-3.2-3b-instruct:free"
     # No AI available - will use pattern matching only
     return "openrouter:meta-llama/llama-3.2-3b-instruct:free"
 
@@ -2036,167 +2254,172 @@ async def natural_language_handler(
 ) -> None:
     """Handle natural language messages (non-command, non-reply).
 
-    This handler attempts to classify the user's intent and either:
-    1. Execute the appropriate action directly
-    2. Suggest the right command
-    3. Treat it as an instruction for the active session
+    Uses the conversational agent (preferred) or command suggester (fallback).
+    The agent can execute read operations directly and asks for confirmation
+    on write operations.
     """
     text = update.message.text.strip()
     if not text:
         return
 
     chat_id = update.effective_chat.id
-    chat_state = get_chat_state(context)
-    settings: Settings = context.bot_data["settings"]
 
     # Show typing indicator while processing
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # Classify the intent using user's selected AI model
+    # Use conversational agent if available (preferred)
+    if AGENT_AVAILABLE and get_agent is not None:
+        await _process_with_agent(text, update, context)
+    else:
+        # Fallback to command suggester
+        await _process_with_suggestions(text, update, context)
+
+
+async def _process_with_agent(
+    text: str,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Process text input using the conversational agent.
+
+    The agent can:
+    - Execute read operations directly and report results
+    - Ask for confirmation on write operations
+    - Have natural conversations
+
+    Args:
+        text: User's text input.
+        update: Telegram update.
+        context: Bot context.
+    """
+    chat_id = update.effective_chat.id
+    chat_state = get_chat_state(context)
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+
+    # Get AI model
     model = await _get_agno_model(settings, chat_state, chat_id)
-    result = await classify_message(text, model=model)
 
-    # Handle based on intent
-    if result.intent == IntentType.UNKNOWN:
-        # Check if there's an active session - treat as instruction
-        active_session = chat_state.get_active_session(chat_id)
-        if active_session:
-            # Treat as instruction for active session
-            await _run_as_instruction(update, context, active_session, text)
-        else:
-            await update.message.reply_text(
-                "I'm not sure what you mean. Use /help to see available "
-                "commands, or select a session first with /use."
+    # Get or create agent
+    agent_db_path = settings.televibe_dir / "agent.db"
+    agent = get_agent(db=db, model=model, db_path=agent_db_path)
+
+    # Set context for this chat (active session, settings)
+    active_session = chat_state.get_active_session(chat_id)
+    agent.set_chat_context(
+        chat_id,
+        active_session=active_session,
+        settings=settings,
+    )
+
+    # Chat with agent
+    response = await agent.chat(text, chat_id)
+
+    # Handle errors
+    if response.error:
+        if response.error in ("rate_limit", "provider_error"):
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Switch Model", callback_data="m:browse")]]
             )
-        return
-
-    if result.intent == IntentType.HELP:
-        await help_command(update, context)
-        return
-
-    if result.intent == IntentType.LIST_PROJECTS:
-        await projects_command(update, context)
-        return
-
-    if result.intent == IntentType.SCAN_PROJECTS:
-        await scan_command(update, context)
-        return
-
-    if result.intent == IntentType.LIST_SESSIONS:
-        await sessions_command(update, context)
-        return
-
-    if result.intent == IntentType.SESSION_STATUS:
-        await status_command(update, context)
-        return
-
-    if result.intent == IntentType.LIST_TASKS:
-        await tasks_command(update, context)
-        return
-
-    if result.intent == IntentType.LIST_APPROVALS:
-        await approvals_command(update, context)
-        return
-
-    if result.intent == IntentType.CREATE_SESSION:
-        # Need project context
-        if result.suggested_command:
-            await update.message.reply_text(
-                f"To create a session, use:\n"
-                f"`{result.suggested_command} <project_id>`\n\n"
-                "See /projects for available projects.",
-                parse_mode="Markdown",
+            await update.effective_message.reply_text(
+                f"⚠️ {response.message}",
+                reply_markup=keyboard,
             )
         else:
-            await update.message.reply_text(
-                "Use /new <project_id> to create a session.\n"
-                "See /projects for available projects."
-            )
+            await update.effective_message.reply_text(response.message)
         return
 
-    if result.intent == IntentType.SWITCH_SESSION:
-        session_id = result.entities.get("session_id")
-        if session_id:
-            context.args = [session_id]
-            await use_session_command(update, context)
+    # Check if there's a pending action needing confirmation
+    if response.pending_action:
+        action = response.pending_action
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Yes", callback_data="agent:confirm"),
+                InlineKeyboardButton("❌ No", callback_data="agent:deny"),
+            ]
+        ])
+
+        # Show agent's message with confirmation buttons
+        msg = response.message
+        if msg:
+            msg += f"\n\n{action.confirm_message}"
         else:
-            await update.message.reply_text(
-                "Which session? Use /sessions to see available sessions."
-            )
+            msg = action.confirm_message
+
+        await update.effective_message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
         return
 
-    if result.intent == IntentType.CLOSE_SESSION:
-        await close_session_command(update, context)
-        return
-
-    if result.intent == IntentType.CLAIM_TASK:
-        task_id = result.entities.get("task_id")
-        if task_id:
-            context.args = [task_id]
-            await claim_task_command(update, context)
-        else:
-            await update.message.reply_text(
-                "Which task? Use /tasks to see available tasks."
-            )
-        return
-
-    if result.intent == IntentType.SYNC_BACKLOG:
-        await sync_backlog_command(update, context)
-        return
-
-    if result.intent == IntentType.CHECK_JOB_STATUS:
-        await jobs_command(update, context)
-        return
-
-    if result.intent == IntentType.VIEW_JOB_LOGS:
-        await tail_command(update, context)
-        return
-
-    if result.intent == IntentType.CANCEL_JOB:
-        await cancel_command(update, context)
-        return
-
-    if result.intent == IntentType.RUN_INSTRUCTION:
-        # Extract instruction from entities or use full text
-        instruction = result.entities.get("instruction", text)
-        active_session = chat_state.get_active_session(chat_id)
-
-        if active_session:
-            await _run_as_instruction(update, context, active_session, instruction)
-        else:
-            await update.message.reply_text(
-                "No active session. Use /use <session_id> to select a session first.\n"
-                "Or /new <project_id> to create one."
-            )
-        return
-
-    if result.intent in (IntentType.APPROVE_ACTION, IntentType.DENY_ACTION):
-        # Check if replying to an approval message
-        if update.message.reply_to_message:
-            msg_ctx = chat_state.get_message_context(
-                update.message.reply_to_message.message_id
-            )
-            if msg_ctx and msg_ctx.message_type == "approval":
-                # Would need approval_id from context
-                await update.message.reply_text(
-                    "Please use the inline buttons to approve or deny actions."
-                )
-                return
-
-        # List pending approvals
-        await approvals_command(update, context)
-        return
-
-    # Default: suggest command
-    if result.suggested_command:
-        await update.message.reply_text(
-            f"Try: `{result.suggested_command}`",
+    # No pending action - just show the response
+    if response.message:
+        await update.effective_message.reply_text(
+            response.message,
             parse_mode="Markdown",
         )
-    else:
-        await update.message.reply_text(
-            "I'm not sure how to help with that. Use /help for available commands."
-        )
+
+
+async def agent_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle agent confirmation callbacks (Yes/No buttons).
+
+    Callback data format: agent:confirm or agent:deny
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("agent:"):
+        return
+
+    chat_id = update.effective_chat.id
+    action_type = data.split(":")[1]  # "confirm" or "deny"
+
+    # Get agent
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    chat_state = get_chat_state(context)
+    model = await _get_agno_model(settings, chat_state, chat_id)
+
+    agent_db_path = settings.televibe_dir / "agent.db"
+    agent = get_agent(db=db, model=model, db_path=agent_db_path)
+
+    # Make sure agent has settings context for execution
+    agent.set_chat_context(
+        chat_id,
+        active_session=chat_state.get_active_session(chat_id),
+        settings=settings,
+    )
+
+    if action_type == "confirm":
+        # Execute the pending action
+        response = await agent.confirm_action(chat_id)
+
+        # Update the message
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text(
+                response.message,
+                parse_mode="Markdown",
+            )
+
+        # If this created a session, update chat state
+        if "Session" in response.message and "created" in response.message:
+            # Extract session ID from response (e.g., "Session S3 created")
+            import re
+            match = re.search(r"Session \*\*(\w+)\*\*", response.message)
+            if match:
+                new_session_id = match.group(1)
+                chat_state.set_active_session(chat_id, new_session_id)
+
+    elif action_type == "deny":
+        # Cancel the pending action
+        response = await agent.deny_action(chat_id)
+
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text(f"❌ {response.message}")
 
 
 async def _run_as_instruction(
@@ -2213,26 +2436,28 @@ async def _run_as_instruction(
         session_id: Session to run in.
         instruction: Instruction text.
     """
+    import asyncio
+
     db = get_db(context)
     settings = get_settings(context)
     chat_state = get_chat_state(context)
     chat_id = update.effective_chat.id
 
+    # Helper for sending messages (works in both message and callback contexts)
+    async def send(text: str, parse_mode: str | None = "Markdown") -> Message:
+        return await context.bot.send_message(chat_id, text, parse_mode=parse_mode)
+
     # Verify session exists and is idle
     session = await db.get_session(session_id)
     if not session:
-        await update.message.reply_text(
-            f"Session `{session_id}` not found.",
-            parse_mode="Markdown",
-        )
+        await send(f"Session `{session_id}` not found.")
         return
 
     if session.state == SessionState.RUNNING:
-        await update.message.reply_text(
+        await send(
             f"Session `{session_id}` is already running "
             f"job `{session.current_job_id}`.\n"
-            "Wait for it to complete or use /cancel.",
-            parse_mode="Markdown",
+            "Wait for it to complete or use /cancel."
         )
         return
 
@@ -2244,13 +2469,12 @@ async def _run_as_instruction(
 
         # Send confirmation
         truncated = instruction[:60] + "..." if len(instruction) > 60 else instruction
-        msg = await update.message.reply_text(
-            f"*Job Started*\n\n"
+        msg = await send(
+            f"🔧 *Job Started*\n\n"
             f"🔹 Job: `{job.job_id}`\n"
             f"📂 Session: `{session_id}`\n"
             f"📝 _{truncated}_\n\n"
-            f"Use /status to monitor progress or /tail to see logs.",
-            parse_mode="Markdown",
+            f"Use /status to monitor progress or /tail to see logs."
         )
 
         # Store message context for reply routing
@@ -2263,8 +2487,109 @@ async def _run_as_instruction(
             message_type="job",
         )
 
+        # Start background task to monitor job completion
+        asyncio.create_task(
+            _monitor_job_completion(
+                context.bot, db, chat_id, job.job_id, session_id, msg.message_id
+            )
+        )
+
     except ValueError as e:
-        await update.message.reply_text(f"Error: {e}")
+        await send(f"Error: {e}", parse_mode=None)
+
+
+async def _monitor_job_completion(
+    bot,
+    db: Database,
+    chat_id: int,
+    job_id: str,
+    session_id: str,
+    status_message_id: int,
+) -> None:
+    """Monitor a job and send completion notification.
+
+    Args:
+        bot: Telegram bot instance.
+        db: Database instance.
+        chat_id: Chat to send notification to.
+        job_id: Job to monitor.
+        session_id: Session ID.
+        status_message_id: Initial status message ID to edit.
+    """
+    import asyncio
+
+    # Poll for completion (max 1 hour)
+    max_polls = 720  # 5 seconds * 720 = 1 hour
+    poll_interval = 5
+
+    for _ in range(max_polls):
+        await asyncio.sleep(poll_interval)
+
+        job = await db.get_job(job_id)
+        if not job:
+            return
+
+        # Check if job is done
+        if job.status in (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELED):
+            # Send completion notification
+            if job.status == JobStatus.DONE:
+                files_text = ""
+                if job.files_changed:
+                    count = len(job.files_changed)
+                    files_text = f"\n📝 {count} file{'s' if count != 1 else ''} changed"
+
+                summary_text = ""
+                if job.result_summary:
+                    summary = job.result_summary[:200]
+                    if len(job.result_summary) > 200:
+                        summary += "..."
+                    summary_text = f"\n\n💬 _{summary}_"
+
+                await bot.send_message(
+                    chat_id,
+                    f"✅ *Job Completed*\n\n"
+                    f"🔹 Job: `{job_id}`\n"
+                    f"📂 Session: `{session_id}`{files_text}{summary_text}\n\n"
+                    f"Use /summary or /tail to see details.",
+                    parse_mode="Markdown",
+                )
+
+            elif job.status == JobStatus.FAILED:
+                error_text = ""
+                if job.error:
+                    error = job.error[:200]
+                    if len(job.error) > 200:
+                        error += "..."
+                    error_text = f"\n\n❗ _{error}_"
+
+                await bot.send_message(
+                    chat_id,
+                    f"❌ *Job Failed*\n\n"
+                    f"🔹 Job: `{job_id}`\n"
+                    f"📂 Session: `{session_id}`{error_text}\n\n"
+                    f"Use /tail to see logs.",
+                    parse_mode="Markdown",
+                )
+
+            elif job.status == JobStatus.CANCELED:
+                await bot.send_message(
+                    chat_id,
+                    f"⏹️ *Job Canceled*\n\n"
+                    f"🔹 Job: `{job_id}`\n"
+                    f"📂 Session: `{session_id}`",
+                    parse_mode="Markdown",
+                )
+
+            return
+
+    # Timeout - job still running after 1 hour
+    await bot.send_message(
+        chat_id,
+        f"⚠️ *Job Timeout*\n\n"
+        f"🔹 Job: `{job_id}` is still running after 1 hour.\n"
+        f"Use /status to check or /cancel to stop.",
+        parse_mode="Markdown",
+    )
 
 
 # =============================================================================
@@ -2326,15 +2651,17 @@ def _build_models_page(
     filter_type: str,
     current_model_id: str | None,
     max_score: float,
+    test_results: dict[str, bool] | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build paginated models display.
 
     Args:
         models: List of ModelInfo objects.
         page: Current page (0-indexed).
-        filter_type: Filter type (all, free, gem, or).
+        filter_type: Filter type (all, free, gem, or, tools).
         current_model_id: Currently selected model ID.
         max_score: Maximum rank score for scaling.
+        test_results: Dict of model_id -> supports_tools from empirical tests.
 
     Returns:
         Tuple of (message_text, keyboard).
@@ -2352,11 +2679,24 @@ def _build_models_page(
     page_models = models[start_idx:end_idx]
 
     # Build header
-    filter_names = {"all": "All", "free": "Free", "gem": "Gemini", "or": "OpenRouter"}
+    filter_names = {
+        "all": "All",
+        "free": "Free",
+        "gem": "Gemini",
+        "or": "OpenRouter",
+        "groq": "Groq",
+        "cere": "Cerebras",
+        "tools": "Tools ✓",
+    }
     filter_name = filter_names.get(filter_type, "All")
 
     text = f"🤖 *AI Models* — {filter_name}\n"
     text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n"
+
+    # Show test status
+    if test_results:
+        tested_count = len(test_results)
+        text += f"🧪 {tested_count} models tested\n"
 
     # Show current model
     if current_model_id:
@@ -2369,17 +2709,28 @@ def _build_models_page(
 
     # Build button list (1 per row, left-aligned with padding)
     keyboard_rows = []
-    button_width = 30  # Fixed width for consistent alignment
+    button_width = 32  # Fixed width for consistent alignment
 
     for i, m in enumerate(page_models):
         global_idx = start_idx + i
         icon = _get_provider_icon(m.id)
         selected = " ✓" if m.id == current_model_id else ""
 
+        # Tool support indicator
+        if test_results and m.id in test_results:
+            # Empirically tested
+            tool_icon = "🔧" if test_results[m.id] else "❌"
+        elif m.supports_tools:
+            # Heuristic says yes but not tested
+            tool_icon = "🔧"
+        else:
+            # Heuristic says no
+            tool_icon = ""
+
         # Create button with icon + model name
         parts = m.id.replace(":free", "").split("/")
         short_name = parts[-1] if len(parts) > 1 else parts[0]
-        label = f"{icon} {short_name}{selected}"
+        label = f"{icon}{tool_icon} {short_name}{selected}"
 
         # Pad with spaces to push text left (workaround for centered buttons)
         padding = button_width - len(label)
@@ -2402,18 +2753,20 @@ def _build_models_page(
     if nav_row:
         keyboard_rows.append(nav_row)
 
-    # Filter row
+    # Filter row (with tools filter)
     filter_row = []
-    filters = [("all", "All"), ("free", "🆓"), ("gem", "💎"), ("or", "🌐")]
+    filters = [("all", "All"), ("tools", "🔧"), ("gem", "💎"), ("or", "🌐"), ("groq", "⚡"), ("cere", "🧠")]
     for f_key, f_label in filters:
         label = f"[{f_label}]" if f_key == filter_type else f_label
-        filter_row.append(
-            InlineKeyboardButton(label, callback_data=f"m:f:{f_key}")
-        )
+        filter_row.append(InlineKeyboardButton(label, callback_data=f"m:f:{f_key}"))
     keyboard_rows.append(filter_row)
 
-    # Refresh button
-    keyboard_rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="m:r")])
+    # Refresh and Test buttons
+    action_row = [
+        InlineKeyboardButton("🔄 Refresh", callback_data="m:r"),
+        InlineKeyboardButton("🧪 Test", callback_data="m:t"),
+    ]
+    keyboard_rows.append(action_row)
 
     return text, InlineKeyboardMarkup(keyboard_rows)
 
@@ -2447,42 +2800,62 @@ def _get_provider_sort_key(model_id: str) -> tuple[int, str]:
 
 
 async def _get_filtered_models(
-    settings: Settings, filter_type: str
-) -> list:
+    settings: Settings,
+    filter_type: str,
+    apply_tool_results: bool = True,
+) -> tuple[list, dict[str, bool]]:
     """Get models with filter applied, grouped by provider.
 
     Args:
         settings: Application settings.
-        filter_type: Filter type (all, free, gem, or).
+        filter_type: Filter type (all, free, gem, or, tools).
+        apply_tool_results: Whether to apply empirical tool test results.
 
     Returns:
-        Filtered list of ModelInfo, sorted by provider then rank.
+        Tuple of (filtered list of ModelInfo, test results dict).
     """
+    # Don't require tools by default - we'll filter manually if needed
     models = await ModelRegistry.get_all_available_models(
         openrouter_key=settings.openrouter_api_key,
         gemini_key=settings.gemini_api_key,
-        free_only=(filter_type in ("all", "free")),
+        groq_key=settings.groq_api_key,
+        cerebras_key=settings.cerebras_api_key,
+        free_only=(filter_type in ("all", "free", "tools")),
+        require_tools=False,  # We'll filter based on test results
     )
 
+    # Load and apply empirical test results
+    test_results = get_tested_models()
+    if apply_tool_results and test_results:
+        models = ModelRegistry.apply_test_results(models, test_results)
+
+    # Apply filters
     if filter_type == "gem":
         models = [m for m in models if m.provider.value == "gemini"]
     elif filter_type == "or":
         models = [m for m in models if m.provider.value == "openrouter"]
+    elif filter_type == "groq":
+        models = [m for m in models if m.provider.value == "groq"]
+    elif filter_type == "cere":
+        models = [m for m in models if m.provider.value == "cerebras"]
     elif filter_type == "free":
         models = [m for m in models if m.is_free]
+    elif filter_type == "tools":
+        # Only show models that support tools (based on test results or heuristics)
+        models = [m for m in models if m.supports_tools]
 
     # Sort by provider group, then by rank within group
-    models.sort(key=lambda m: (
-        _get_provider_sort_key(m.id)[0],
-        -m.rank_score  # Higher score first within provider
-    ))
+    models.sort(
+        key=lambda m: (
+            _get_provider_sort_key(m.id)[0],
+            -m.rank_score,  # Higher score first within provider
+        )
+    )
 
-    return models
+    return models, test_results
 
 
-async def models_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /models command - list available AI models with pagination."""
     settings = get_settings(context)
     chat_state = get_chat_state(context)
@@ -2500,9 +2873,27 @@ async def models_command(
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+    # Check if tool tests need to run today
+    results = load_results()
+    if needs_testing(results):
+        # Notify user that tests will run
+        await update.message.reply_text(
+            "🧪 Running daily tool support tests...\n"
+            "This may take a few minutes on first run.",
+        )
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+        # Run tests in background
+        await run_full_test(
+            openrouter_key=settings.openrouter_api_key,
+            gemini_key=settings.gemini_api_key,
+            groq_key=settings.groq_api_key,
+            cerebras_key=settings.cerebras_api_key,
+        )
+
     # Get available models (default filter: all free)
     filter_type = "all"
-    models = await _get_filtered_models(settings, filter_type)
+    models, test_results = await _get_filtered_models(settings, filter_type)
 
     if not models:
         await update.message.reply_text("No models available.")
@@ -2511,6 +2902,7 @@ async def models_command(
     # Store models in user_data for callback selection
     context.user_data["models_cache"] = models
     context.user_data["models_filter"] = filter_type
+    context.user_data["models_test_results"] = test_results
 
     # Get current model
     current_model_id, _ = chat_state.get_ai_model(chat_id)
@@ -2520,16 +2912,18 @@ async def models_command(
 
     # Build paginated display (start at page 0)
     text, keyboard = _build_models_page(
-        models, page=0, filter_type=filter_type,
-        current_model_id=current_model_id, max_score=max_score
+        models,
+        page=0,
+        filter_type=filter_type,
+        current_model_id=current_model_id,
+        max_score=max_score,
+        test_results=test_results,
     )
 
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
-async def model_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /model command - set AI model."""
     chat_state = get_chat_state(context)
     settings = get_settings(context)
@@ -2567,8 +2961,7 @@ async def model_command(
 
     if not model:
         await update.message.reply_text(
-            f"Model `{model_id}` not found.\n\n"
-            f"Use /models to see available options.",
+            f"Model `{model_id}` not found.\n\nUse /models to see available options.",
             parse_mode="Markdown",
         )
         return
@@ -2591,9 +2984,10 @@ async def model_callback_handler(
 
     Callback formats:
     - m:p:PAGE:FILTER - Navigate to page
-    - m:f:FILTER - Change filter (all, free, gem, or)
+    - m:f:FILTER - Change filter (all, free, gem, or, tools)
     - m:s:INDEX - Select model by index
     - m:r - Refresh model list
+    - m:t - Run tool tests
     """
     query = update.callback_query
     await query.answer()
@@ -2613,11 +3007,52 @@ async def model_callback_handler(
     # Get cached models or fetch fresh
     models = context.user_data.get("models_cache", [])
     filter_type = context.user_data.get("models_filter", "all")
+    test_results = context.user_data.get("models_test_results", {})
+
+    # Handle tool testing
+    if action == "t":
+        await query.edit_message_text(
+            "🧪 *Running tool tests...*\n\n"
+            "Testing models in batches of 10.\n"
+            "This may take a few minutes.",
+            parse_mode="Markdown",
+        )
+
+        # Force run tests
+        await run_full_test(
+            openrouter_key=settings.openrouter_api_key,
+            gemini_key=settings.gemini_api_key,
+            groq_key=settings.groq_api_key,
+            cerebras_key=settings.cerebras_api_key,
+            force=True,
+        )
+
+        # Refresh models with new test results
+        models, test_results = await _get_filtered_models(settings, filter_type)
+        context.user_data["models_cache"] = models
+        context.user_data["models_test_results"] = test_results
+
+        current_model_id, _ = chat_state.get_ai_model(chat_id)
+        max_score = max(m.rank_score for m in models) if models else 1.0
+
+        text, keyboard = _build_models_page(
+            models,
+            page=0,
+            filter_type=filter_type,
+            current_model_id=current_model_id,
+            max_score=max_score,
+            test_results=test_results,
+        )
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=keyboard
+        )
+        return
 
     # Handle refresh
     if action == "r":
-        models = await _get_filtered_models(settings, filter_type)
+        models, test_results = await _get_filtered_models(settings, filter_type)
         context.user_data["models_cache"] = models
+        context.user_data["models_test_results"] = test_results
 
         if not models:
             await query.edit_message_text("No models available.")
@@ -2627,8 +3062,12 @@ async def model_callback_handler(
         max_score = max(m.rank_score for m in models) if models else 1.0
 
         text, keyboard = _build_models_page(
-            models, page=0, filter_type=filter_type,
-            current_model_id=current_model_id, max_score=max_score
+            models,
+            page=0,
+            filter_type=filter_type,
+            current_model_id=current_model_id,
+            max_score=max_score,
+            test_results=test_results,
         )
         try:
             await query.edit_message_text(
@@ -2647,9 +3086,10 @@ async def model_callback_handler(
 
         # Refresh models if cache is empty
         if not models:
-            models = await _get_filtered_models(settings, filter_type)
+            models, test_results = await _get_filtered_models(settings, filter_type)
             context.user_data["models_cache"] = models
             context.user_data["models_filter"] = filter_type
+            context.user_data["models_test_results"] = test_results
 
         if not models:
             await query.edit_message_text("No models available.")
@@ -2659,8 +3099,12 @@ async def model_callback_handler(
         max_score = max(m.rank_score for m in models) if models else 1.0
 
         text, keyboard = _build_models_page(
-            models, page=page, filter_type=filter_type,
-            current_model_id=current_model_id, max_score=max_score
+            models,
+            page=page,
+            filter_type=filter_type,
+            current_model_id=current_model_id,
+            max_score=max_score,
+            test_results=test_results,
         )
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=keyboard
@@ -2672,9 +3116,10 @@ async def model_callback_handler(
         filter_type = parts[2]
 
         # Fetch models with new filter
-        models = await _get_filtered_models(settings, filter_type)
+        models, test_results = await _get_filtered_models(settings, filter_type)
         context.user_data["models_cache"] = models
         context.user_data["models_filter"] = filter_type
+        context.user_data["models_test_results"] = test_results
 
         if not models:
             await query.edit_message_text(
@@ -2687,8 +3132,12 @@ async def model_callback_handler(
         max_score = max(m.rank_score for m in models) if models else 1.0
 
         text, keyboard = _build_models_page(
-            models, page=0, filter_type=filter_type,
-            current_model_id=current_model_id, max_score=max_score
+            models,
+            page=0,
+            filter_type=filter_type,
+            current_model_id=current_model_id,
+            max_score=max_score,
+            test_results=test_results,
         )
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=keyboard
@@ -2703,9 +3152,7 @@ async def model_callback_handler(
             return
 
         if not models or idx >= len(models):
-            await query.edit_message_text(
-                "Model list expired. Use /models to refresh."
-            )
+            await query.edit_message_text("Model list expired. Use /models to refresh.")
             return
 
         model = models[idx]
@@ -2715,13 +3162,21 @@ async def model_callback_handler(
             chat_id, model.id, model.provider.value
         )
 
+        # Tool support status
+        tool_status = "🔧 Yes" if model.supports_tools else "❌ No"
+        if test_results and model.id in test_results:
+            tool_status += " (tested)"
+        else:
+            tool_status += " (heuristic)"
+
         icon = _get_provider_icon(model.id)
         await query.edit_message_text(
             f"✅ *Model Selected*\n\n"
             f"{icon} `{model.id}`\n\n"
             f"Provider: {model.provider.value}\n"
             f"Context: {model.context_length:,} tokens\n"
-            f"Free: {'Yes' if model.is_free else 'No'}",
+            f"Free: {'Yes' if model.is_free else 'No'}\n"
+            f"Tools: {tool_status}",
             parse_mode="Markdown",
         )
 
@@ -2734,10 +3189,11 @@ async def model_callback_handler(
 async def voice_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle voice messages by transcribing and processing as text.
+    """Handle voice messages by transcribing and showing confirmation.
 
-    Uses Groq Whisper API to transcribe voice messages, then processes
-    the transcribed text through the natural language handler.
+    Uses Groq Whisper API to transcribe voice messages, then shows
+    a confirmation button before processing. This prevents accidental
+    execution from misheard transcriptions.
     """
     settings: Settings = context.bot_data["settings"]
     chat_id = update.effective_chat.id
@@ -2778,56 +3234,546 @@ async def voice_message_handler(
             )
             return
 
-        # Show what was transcribed
-        await update.message.reply_text(
-            f"🎤 *Transcribed:*\n_{transcribed_text}_",
-            parse_mode="Markdown",
+        # Truncate for callback data (Telegram limit is 64 bytes)
+        truncated = transcribed_text[:40] if len(transcribed_text) > 40 else ""
+        truncated = truncated or transcribed_text
+
+        # Show transcription with confirmation buttons
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="✅ Confirm",
+                        callback_data=f"voice:confirm:{truncated}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Cancel",
+                        callback_data="voice:cancel",
+                    )
+                ],
+            ]
         )
 
-        # Now process as if user sent this text
-        chat_state = get_chat_state(context)
+        # Store full text in context for retrieval (callback data is limited)
+        if "voice_transcriptions" not in context.bot_data:
+            context.bot_data["voice_transcriptions"] = {}
+        context.bot_data["voice_transcriptions"][chat_id] = transcribed_text
 
-        # Classify the intent using user's selected AI model
-        model = await _get_agno_model(settings, chat_state, chat_id)
-        result = await classify_message(transcribed_text, model=model)
-
-        # Handle based on intent (same logic as natural_language_handler)
-        if result.intent == IntentType.UNKNOWN:
-            active_session = chat_state.get_active_session(chat_id)
-            if active_session:
-                await _run_as_instruction(
-                    update, context, active_session, transcribed_text
-                )
-            else:
-                await update.message.reply_text(
-                    "I understood: " + transcribed_text + "\n\n"
-                    "Use /help to see commands, or /use to select a session."
-                )
-            return
-
-        # Route known intents to their handlers
-        if result.intent == IntentType.HELP:
-            await help_command(update, context)
-        elif result.intent == IntentType.LIST_PROJECTS:
-            await projects_command(update, context)
-        elif result.intent == IntentType.LIST_SESSIONS:
-            await sessions_command(update, context)
-        elif result.intent == IntentType.SESSION_STATUS:
-            await status_command(update, context)
-        elif result.intent == IntentType.LIST_TASKS:
-            await tasks_command(update, context)
-        elif result.intent == IntentType.LIST_APPROVALS:
-            await approvals_command(update, context)
-        else:
-            # For other intents, show the suggested command
-            if result.suggested_command:
-                await update.message.reply_text(
-                    f"Try: `{result.suggested_command}`",
-                    parse_mode="Markdown",
-                )
+        await update.message.reply_text(
+            f"🎤 *Transcribed:*\n_{transcribed_text}_\n\n"
+            "Confirm to process this message:",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
 
     except Exception as e:
         await update.message.reply_text(
-            f"🎤 Transcription error: {e}\n\n"
-            "Please try again or send as text."
+            f"🎤 Transcription error: {e}\n\nPlease try again or send as text."
         )
+
+
+# Command execution dispatch table
+_COMMAND_DISPATCH = {
+    "/help": help_command,
+    "/projects": projects_command,
+    "/scan": scan_command,
+    "/sessions": sessions_command,
+    "/status": status_command,
+    "/jobs": jobs_command,
+    "/tail": tail_command,
+    "/tasks": tasks_command,
+    "/next": next_tasks_command,
+    "/approvals": approvals_command,
+    "/models": models_command,
+}
+
+
+async def _execute_command(
+    command: str,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Execute a suggested command.
+
+    Args:
+        command: Full command string (e.g., "/sessions" or "/new myproject").
+        update: Telegram update.
+        context: Bot context.
+
+    Returns:
+        True if command was executed, False if not recognized.
+    """
+    parts = command.split(maxsplit=1)
+    base_cmd = parts[0]
+    args = parts[1] if len(parts) > 1 else ""
+
+    # Get common context
+    db: Database = context.bot_data["db"]
+    chat_state = get_chat_state(context)
+    chat_id = update.effective_chat.id
+
+    # Helper to send messages (works in both message and callback contexts)
+    async def send(text: str, parse_mode: str | None = None) -> None:
+        await context.bot.send_message(chat_id, text, parse_mode=parse_mode)
+
+    # Handle simple commands - implement directly instead of delegating
+    # (handlers use update.effective_message which is None in callback context)
+    if base_cmd == "/sessions" and not args:
+        active_sessions = await db.get_active_sessions()
+        if not active_sessions:
+            await send("No active sessions.\n\nUse /new <project> to create one.")
+        else:
+            lines = ["**Active Sessions:**\n"]
+            for s in active_sessions:
+                state_emoji = {"idle": "💤", "running": "🔄", "paused": "⏸️"}.get(
+                    s.state.value, "❓"
+                )
+                lines.append(f"{state_emoji} `{s.session_id}` - {s.project_id}")
+            await send("\n".join(lines), parse_mode="Markdown")
+        return True
+
+    if base_cmd == "/projects" and not args:
+        all_projects = await db.get_all_projects()
+        if not all_projects:
+            await send("No projects registered.\n\nUse /scan to find repositories.")
+        else:
+            lines = ["**Registered Projects:**\n"]
+            for p in all_projects:
+                lines.append(f"📂 `{p.project_id}` - {p.path}")
+            await send("\n".join(lines), parse_mode="Markdown")
+        return True
+
+    if base_cmd == "/status" and not args:
+        session_id = chat_state.get_active_session(chat_id)
+        if not session_id:
+            await send("No active session. Use /use or /new first.")
+        else:
+            session = await db.get_session(session_id)
+            if session:
+                await send(
+                    f"**Session {session_id}**\n\n"
+                    f"📂 Project: `{session.project_id}`\n"
+                    f"🌿 Branch: `{session.branch}`\n"
+                    f"📁 {session.workspace_path}",
+                    parse_mode="Markdown",
+                )
+            else:
+                await send(f"Session {session_id} not found.")
+        return True
+
+    if base_cmd == "/jobs" and not args:
+        session_id = chat_state.get_active_session(chat_id)
+        if not session_id:
+            await send("No active session.")
+        else:
+            recent_jobs = await db.get_jobs_by_session(session_id, limit=5)
+            if not recent_jobs:
+                await send(f"No jobs for session {session_id}.")
+            else:
+                lines = [f"**Recent Jobs ({session_id}):**\n"]
+                for j in recent_jobs:
+                    status_emoji = {
+                        "queued": "⏳",
+                        "running": "🔄",
+                        "done": "✅",
+                        "failed": "❌",
+                        "canceled": "⏹️",
+                    }.get(j.status.value, "❓")
+                    lines.append(f"{status_emoji} `{j.job_id[:8]}` - {j.instruction[:30]}")
+                await send("\n".join(lines), parse_mode="Markdown")
+        return True
+
+    if base_cmd == "/help" and not args:
+        help_text = (
+            "**TeleVibeCode Commands**\n\n"
+            "📂 **Projects**\n"
+            "/projects - List registered projects\n"
+            "/scan - Scan for new projects\n\n"
+            "🔧 **Sessions**\n"
+            "/sessions - List active sessions\n"
+            "/new <project> - Create session\n"
+            "/use <session> - Switch session\n"
+            "/close - Close session\n"
+            "/status - Show status\n\n"
+            "🚀 **Jobs**\n"
+            "/run <instruction> - Run code task\n"
+            "/jobs - List recent jobs\n"
+            "/tail - View job logs\n"
+            "/cancel - Cancel job\n\n"
+            "🤖 **AI**\n"
+            "/models - Browse AI models\n"
+            "/model - Set AI model\n"
+            "/reset - Clear AI history"
+        )
+        await send(help_text, parse_mode="Markdown")
+        return True
+
+    if base_cmd == "/use" and args:
+        session_id = args.strip().upper()
+        result = await sessions.get_session(db, session_id)
+        if not result:
+            await send(f"Session {session_id} not found.")
+            return True
+        chat_state.set_active_session(chat_id, session_id)
+        await send(
+            f"✅ Switched to session {session_id}\n\n"
+            f"📂 {result['project_id']} 🌿 {result['branch']}"
+        )
+        return True
+
+    if base_cmd == "/new" and args:
+        project_id = args.strip()
+        settings: Settings = context.bot_data["settings"]
+        try:
+            result = await sessions.create_session(db, settings, project_id)
+        except ValueError as e:
+            await send(f"Error: {e}")
+            return True
+        chat_state.set_active_session(chat_id, result["session_id"])
+        await send(
+            f"✅ Session created: {result['session_id']}\n\n"
+            f"📂 {result['project_id']} 🌿 {result['branch']}\n"
+            f"📁 {result['workspace_path']}"
+        )
+        return True
+
+    if base_cmd == "/close":
+        if args:
+            session_id = args.strip().upper()
+        else:
+            session_id = chat_state.get_active_session(chat_id)
+        if not session_id:
+            await send("No active session to close.")
+            return True
+        try:
+            await sessions.close_session(db, session_id)
+        except ValueError as e:
+            await send(f"Error: {e}")
+            return True
+        if chat_state.get_active_session(chat_id) == session_id:
+            chat_state.set_active_session(chat_id, None)
+        await send(f"✅ Session {session_id} closed.")
+        return True
+
+    if base_cmd == "/cancel":
+        session_id = chat_state.get_active_session(chat_id)
+        if not session_id:
+            await send("No active session.")
+            return True
+        # Cancel logic would go here
+        await send(f"🛑 Cancelling job for session {session_id}...")
+        return True
+
+    if base_cmd == "/run" and args:
+        session_id = chat_state.get_active_session(chat_id)
+        if not session_id:
+            await send("No active session. Use /use or /new first.")
+            return True
+        await _run_as_instruction(update, context, session_id, args)
+        return True
+
+    if base_cmd == "/claim" and args:
+        task_id = args.strip().upper()
+        session_id = chat_state.get_active_session(chat_id)
+        if not session_id:
+            await send("No active session. Use /use first to claim a task.")
+            return True
+        try:
+            await tasks.claim_task(db, task_id, session_id)
+        except ValueError as e:
+            await send(f"Error: {e}")
+            return True
+        await send(f"✅ Task {task_id} claimed by session {session_id}")
+        return True
+
+    if base_cmd == "/sync":
+        await sync_backlog_command(update, context)
+        return True
+
+    if base_cmd == "/newproject" and args:
+        name = args.strip().lower()  # Force lowercase
+        settings: Settings = context.bot_data["settings"]
+
+        # Validate name
+        error = projects.validate_project_name(name)
+        if error:
+            await send(f"❌ Invalid name: {error}")
+            return True
+
+        try:
+            # Create project (local only when from suggestions)
+            result = await projects.create_project(
+                db=db,
+                projects_root=settings.televibe_root,
+                name=name,
+                remote=None,  # Skip remote for quick creation
+            )
+
+            # Create initial session
+            session_result = await sessions.create_session(
+                db=db,
+                settings=settings,
+                project_id=name,
+            )
+
+            # Set as active session
+            chat_state.set_active_session(chat_id, session_result["session_id"])
+
+            await send(
+                f"✅ Project created!\n\n"
+                f"📂 `{result['path']}`\n"
+                f"🔹 Session `{session_result['session_id']}` created\n"
+                f"🌿 Branch: `{session_result['branch']}`\n\n"
+                f"Ready for instructions!"
+            )
+        except ValueError as e:
+            await send(f"❌ Error: {e}")
+        return True
+
+    return False
+
+
+def _build_suggestion_keyboard(
+    suggestions: list, include_cancel: bool = True
+) -> InlineKeyboardMarkup:
+    """Build inline keyboard for command suggestions.
+
+    Args:
+        suggestions: List of CommandSuggestion objects.
+        include_cancel: Whether to include a cancel button.
+
+    Returns:
+        InlineKeyboardMarkup with command buttons.
+    """
+    buttons = []
+    for i, s in enumerate(suggestions[:4]):  # Max 4 suggestions
+        # Truncate long descriptions
+        desc = s.description[:30] + "..." if len(s.description) > 30 else s.description
+        label = f"{s.command}" if s.confidence >= 0.8 else f"{desc}"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅ ' if s.is_write else ''}{label}",
+                    callback_data=f"cmd:{i}:{s.command[:50]}",
+                )
+            ]
+        )
+
+    if include_cancel:
+        buttons.append(
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="cmd:cancel")]
+        )
+
+    return InlineKeyboardMarkup(buttons)
+
+
+async def command_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle command suggestion button callbacks.
+
+    Callback data format: cmd:<index>:<command> or cmd:cancel
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("cmd:"):
+        return
+
+    parts = data.split(":", 2)
+    if len(parts) < 2:
+        return
+
+    if parts[1] == "cancel":
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text("Cancelled.")
+        return
+
+    # Extract command from callback data
+    if len(parts) < 3:
+        return
+
+    command = parts[2]
+
+    # Show processing
+    with contextlib.suppress(BadRequest):
+        await query.edit_message_text(f"Executing: `{command}`", parse_mode="Markdown")
+
+    # Execute the command
+    executed = await _execute_command(command, update, context)
+
+    if not executed:
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(
+            chat_id, f"Could not execute: {command}\nPlease use the command directly."
+        )
+
+
+async def voice_confirm_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle voice transcription confirmation callbacks.
+
+    Callback data format: voice:confirm:<text> or voice:cancel
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("voice:"):
+        return
+
+    parts = data.split(":", 2)
+    if len(parts) < 2:
+        return
+
+    chat_id = update.effective_chat.id
+
+    if parts[1] == "cancel":
+        # Clean up stored transcription
+        if "voice_transcriptions" in context.bot_data:
+            context.bot_data["voice_transcriptions"].pop(chat_id, None)
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text("🎤 Cancelled.")
+        return
+
+    if parts[1] == "confirm":
+        # Get full text from stored context (callback data is truncated)
+        transcribed_text = None
+        if "voice_transcriptions" in context.bot_data:
+            store = context.bot_data["voice_transcriptions"]
+            transcribed_text = store.pop(chat_id, None)
+
+        # Fallback to truncated text from callback data
+        if not transcribed_text and len(parts) >= 3:
+            transcribed_text = parts[2]
+
+        if not transcribed_text:
+            with contextlib.suppress(BadRequest):
+                await query.edit_message_text("🎤 Session expired. Please try again.")
+            return
+
+        # Update message to show processing
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text(
+                f"🎤 Processing: _{transcribed_text}_",
+                parse_mode="Markdown",
+            )
+
+        # Now process using command suggester
+        await _process_with_suggestions(transcribed_text, update, context)
+
+
+async def _process_with_suggestions(
+    text: str,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Process text input using command suggester.
+
+    Args:
+        text: User's text input.
+        update: Telegram update.
+        context: Bot context.
+    """
+    chat_id = update.effective_chat.id
+    chat_state = get_chat_state(context)
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+
+    # Get context for suggestions
+    active_session = chat_state.get_active_session(chat_id)
+
+    # Get available projects and sessions (these return list[dict] directly)
+    projects_list = await projects.list_projects(db)
+    project_ids = [p["project_id"] for p in projects_list]
+
+    sessions_list = await sessions.list_sessions(db)
+    session_ids = [s["session_id"] for s in sessions_list]
+
+    # Get AI model
+    model = await _get_agno_model(settings, chat_state, chat_id)
+
+    # Get suggestions (use persistent memory database)
+    suggester_db_path = settings.televibe_dir / "command_suggester.db"
+    result = await suggest_commands(
+        message=text,
+        chat_id=chat_id,
+        model=model,
+        db_path=suggester_db_path,
+        active_session=active_session,
+        projects=project_ids,
+        sessions=session_ids,
+    )
+
+    # Handle greetings
+    if result.is_greeting:
+        await update.effective_message.reply_text(result.message or "Hello!")
+        return
+
+    # Handle conversational (just message, no commands)
+    if result.is_conversational and result.message:
+        await update.effective_message.reply_text(result.message)
+        return
+
+    # Handle missing context
+    if result.needs_context:
+        msg = f"I need more context: {result.needs_context}\n\n"
+        if result.needs_context == "session":
+            msg += "Use /sessions to see available sessions, or /new to create one."
+        elif result.needs_context == "project":
+            msg += "Use /projects to see available projects."
+        await update.effective_message.reply_text(msg)
+        return
+
+    # Handle suggestions
+    if result.suggestions:
+        # Check for auto-execute (only for high-confidence read-only commands)
+        top = result.suggestions[0]
+        if top.auto_execute and not top.is_write:
+            # Execute directly
+            executed = await _execute_command(top.command, update, context)
+            if executed:
+                return
+
+        # Show buttons for confirmation
+        # For single high-confidence suggestion, make it prominent
+        if len(result.suggestions) == 1 and top.confidence >= 0.8:
+            keyboard = _build_suggestion_keyboard(result.suggestions)
+            msg = f"Did you mean:\n\n`{top.command}`\n_{top.description}_"
+        else:
+            # Multiple suggestions
+            keyboard = _build_suggestion_keyboard(result.suggestions)
+            lines = ["Which command?", ""]
+            for s in result.suggestions[:4]:
+                filled = int(s.confidence * 5)
+                conf_bar = "●" * filled + "○" * (5 - filled)
+                lines.append(f"`{s.command}` {conf_bar}")
+            msg = "\n".join(lines)
+
+        await update.effective_message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
+    # No suggestions - check for errors first
+    if result.error_type in ("rate_limit", "provider_error"):
+        # Show error with button to switch models
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Switch Model", callback_data="m:browse")]]
+        )
+        msg = result.message or "AI model error. Try switching models."
+        await update.effective_message.reply_text(
+            f"⚠️ {msg}",
+            reply_markup=keyboard,
+        )
+        return
+
+    # No suggestions - show help message
+    msg = result.message or "I'm not sure what you mean. Try /help to see commands."
+    await update.effective_message.reply_text(msg)

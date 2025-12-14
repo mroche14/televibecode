@@ -50,7 +50,11 @@ class Settings(BaseSettings):
     )
     groq_api_key: str | None = Field(
         default=None,
-        description="Groq API key (for Whisper audio transcription)",
+        description="Groq API key (fast LLMs + Whisper audio transcription)",
+    )
+    cerebras_api_key: str | None = Field(
+        default=None,
+        description="Cerebras API key (ultra-fast inference)",
     )
 
     @property
@@ -65,13 +69,18 @@ class Settings(BaseSettings):
 
     @property
     def has_groq(self) -> bool:
-        """Check if Groq (audio transcription) is available."""
+        """Check if Groq is available."""
         return bool(self.groq_api_key)
+
+    @property
+    def has_cerebras(self) -> bool:
+        """Check if Cerebras is available."""
+        return bool(self.cerebras_api_key)
 
     @property
     def has_ai(self) -> bool:
         """Check if any AI provider is available."""
-        return self.has_gemini or self.has_openrouter
+        return self.has_gemini or self.has_openrouter or self.has_groq or self.has_cerebras
 
     # Paths
     televibe_root: Path = Field(
@@ -191,18 +200,18 @@ def _print_missing_config_help(error: Exception) -> None:
     print("TELEGRAM_BOT_TOKEN=your_token_here")
     print("TELEGRAM_ALLOWED_CHAT_IDS=your_chat_id")
     print()
-    print("# AI providers (set one or both)")
+    print("# AI providers (set at least one)")
     print("GEMINI_API_KEY=your_gemini_key")
     print("OPENROUTER_API_KEY=your_openrouter_key")
-    print()
-    print("# Voice transcription (optional)")
     print("GROQ_API_KEY=your_groq_key")
+    print("CEREBRAS_API_KEY=your_cerebras_key")
     print("-" * 40)
     print()
     print("Get API keys:")
     print("  - Gemini: https://aistudio.google.com/apikey")
     print("  - OpenRouter: https://openrouter.ai/keys")
     print("  - Groq: https://console.groq.com/keys")
+    print("  - Cerebras: https://cloud.cerebras.ai")
     print()
 
     # Print the actual validation error for debugging

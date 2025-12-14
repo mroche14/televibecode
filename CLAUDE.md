@@ -49,8 +49,9 @@ src/televibecode/
 │   ├── models.py        # Pydantic data models
 │   └── database.py      # SQLite async CRUD
 ├── ai/
-│   ├── models.py        # AI model definitions
-│   ├── classify.py      # Intent classification
+│   ├── models.py        # AI provider/model registry (Gemini, OpenRouter, Groq, Cerebras)
+│   ├── tool_tester.py   # Empirical tool calling tests
+│   ├── agent.py         # Conversational AI agent
 │   └── transcription.py # Voice transcription (Groq Whisper)
 ├── orchestrator/
 │   ├── server.py        # MCP server
@@ -89,6 +90,25 @@ Telegram Bot <-> Orchestrator MCP <-> Sessions / Repos / Tasks / Claude Code
 ├── project-a/                # Unmodified user repos
 └── project-b/
 ```
+
+## AI Providers
+
+TeleVibeCode supports multiple AI providers for natural language processing:
+
+| Provider | Env Variable | Use Case |
+|----------|--------------|----------|
+| **Gemini** | `GEMINI_API_KEY` | Recommended default, long context |
+| **OpenRouter** | `OPENROUTER_API_KEY` | Access to many free models |
+| **Groq** | `GROQ_API_KEY` | Ultra-fast inference + voice transcription |
+| **Cerebras** | `CEREBRAS_API_KEY` | Fastest inference available |
+
+Models are fetched dynamically from each provider's API. Use `/models` in Telegram to:
+- View all available models with tool support indicators (🔧)
+- Filter by provider: 💎 Gemini, 🌐 OpenRouter, ⚡ Groq, 🧠 Cerebras
+- Run tool tests (🧪) to verify function calling support
+- Refresh model lists (🔄) from APIs
+
+Tool test results are cached in `~/.televibe/tool_test_results.json`.
 
 ## Code Style
 

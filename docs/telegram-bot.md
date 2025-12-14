@@ -67,6 +67,46 @@ List all registered projects.
    ~/projects/project-c
 ```
 
+#### `/newproject <name>`
+Create a new project from scratch.
+
+**Flow**:
+1. Creates directory in projects root
+2. Initializes git repo with README.md and .gitignore
+3. Optionally creates remote repo on GitHub/GitLab
+4. Registers in database
+5. Auto-creates first session
+
+**Usage**:
+```
+/newproject my-app
+```
+
+**Output**:
+```
+📂 Creating project "my-app"
+
+Create remote repository?
+[🐙 GitHub] [🦊 GitLab] [⏭️ Skip]
+```
+
+After selection:
+```
+✅ Project created!
+
+📂 ~/projects/my-app
+🌐 github.com/user/my-app (if GitHub selected)
+
+🔹 Session S5 created
+🌿 Branch: main
+
+Ready for instructions!
+```
+
+**Requirements for remote**:
+- GitHub: `gh` CLI installed and authenticated
+- GitLab: `glab` CLI installed and authenticated
+
 #### `/project <name>`
 Get project details.
 
@@ -380,19 +420,54 @@ Reply to send instructions to this session
 
 ### Natural Language Support
 
-The Middle AI layer can parse natural language:
+The bot uses smart command suggestion to interpret natural language input and map it to commands.
 
-| User says | Interpreted as |
-|-----------|----------------|
-| "fix the auth bug" | `run_instruction(active_session, "fix the auth bug")` |
-| "what's next on project-a?" | `get_next_tasks("project-a")` |
-| "switch to the payments feature" | `use_session(<session on payments branch>)` |
-| "show me all sessions" | `list_sessions()` |
-| "start working on T-125" | `claim_task("T-125", active_session) + run_instruction(...)` |
+#### Command Classification
+
+Commands are classified as **read** (safe) or **write** (state-modifying):
+
+| Type | Commands | Behavior |
+|------|----------|----------|
+| **Read** | `/help`, `/projects`, `/sessions`, `/use`, `/status`, `/jobs`, `/tail`, `/tasks`, `/next`, `/summary`, `/approvals`, `/models`, `/model` | Auto-execute at 95%+ confidence |
+| **Write** | `/new`, `/newproject`, `/close`, `/run`, `/cancel`, `/claim`, `/sync`, `/scan` | Always require confirmation |
+
+#### Confidence Levels
+
+| Confidence | Behavior |
+|------------|----------|
+| 95%+ (read commands) | Auto-execute immediately |
+| 70-95% | Show suggestion with [Execute] button |
+| < 70% | Show multiple suggestions to choose from |
+
+#### Examples
+
+| User says | Suggested command | Confidence |
+|-----------|-------------------|------------|
+| "show sessions" | `/sessions` | 100% (auto-execute) |
+| "show me all sessions" | `/sessions` | 95% (auto-execute) |
+| "start working on televibecode" | `/new televibecode` | 85% (confirm) |
+| "run the tests" | `/run pytest` | 85% (confirm) |
+| "what's happening" | `/status`, `/jobs`, `/sessions` | 60% (show options) |
+
+#### Confirmation Flow
+
+For write commands or lower confidence suggestions:
+
+```
+User: start a new session on televibecode
+
+Bot: 💡 Suggested command:
+     /new televibecode
+     Create session for televibecode
+
+     [✅ Execute] [❌ Cancel]
+```
+
+Clicking **Execute** runs the command, **Cancel** dismisses the suggestion.
 
 ### Voice Messages (Audio Transcription)
 
-Send voice messages or audio files to control the bot hands-free. Voice messages are automatically transcribed using Groq's Whisper API.
+Send voice messages or audio files to control the bot hands-free. Voice messages are transcribed using Groq's Whisper API and require confirmation before processing.
 
 **Requirements:**
 - `GROQ_API_KEY` environment variable set
@@ -403,8 +478,9 @@ Send voice messages or audio files to control the bot hands-free. Voice messages
 1. User sends voice message 🎤
 2. Bot downloads audio from Telegram (OGG format)
 3. Bot sends to Groq Whisper for transcription
-4. Bot shows transcribed text
-5. Bot processes as natural language (same as text)
+4. Bot shows transcribed text with Confirm/Cancel buttons
+5. User confirms or cancels
+6. If confirmed, bot processes as natural language (command suggestion)
 ```
 
 **Example:**
@@ -414,10 +490,16 @@ User: 🎤 (voice message: "show me all sessions")
 Bot: 🎤 Transcribed:
      "show me all sessions"
 
+     [✅ Confirm] [❌ Cancel]
+
+User: [clicks Confirm]
+
 Bot: 🔹 Active Sessions:
      S12 - project-a/feature-x (idle)
      S15 - project-b/bugfix (running)
 ```
+
+**Why confirmation?** Voice transcription can occasionally mishear words, especially technical terms. The confirmation step prevents accidental execution of misheard commands like `/close` or `/cancel`.
 
 **Supported formats:** OGG, MP3, WAV, M4A, WebM (up to 25MB)
 

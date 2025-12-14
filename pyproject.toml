@@ -15,10 +15,12 @@ dependencies = [
     "pyyaml>=6.0",
     "aiofiles>=24.0",
     "python-dotenv>=1.0",
-    "agno",
+    "agno[sqlite]",
     "google-genai>=1.55.0",
     "openai>=2.11.0",
     "claude-agent-sdk>=0.1.16",
+    "groq>=0.37.1",
+    "cerebras>=0.0.1",
 ]
 
 [project.optional-dependencies]
@@ -95,5 +97,6 @@ disable_error_code = ["attr-defined", "import-untyped", "name-defined"]
 
 [dependency-groups]
 dev = [
+    "pytest-cov>=7.0.0",
     "types-pyyaml>=6.0.12.20250915",
 ]

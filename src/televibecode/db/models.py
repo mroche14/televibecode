@@ -75,7 +75,7 @@ class Project(BaseModel):
 class Session(BaseModel):
     """Represents an active Claude Code workspace on a specific branch."""
 
-    session_id: str = Field(..., pattern=r"^S[0-9]+$")
+    session_id: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$")
     project_id: str
     display_name: str | None = None
     workspace_path: str
