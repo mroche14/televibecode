@@ -2714,11 +2714,9 @@ def _build_models_page(
 
     text = f"🤖 *AI Models* — {filter_name}\n"
     text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n\n"
-    text += "• 💎 Gemini\n"
-    text += "• 🌐 OpenRouter\n"
-    text += "• ⚡ Groq\n"
-    text += "• 🧠 Cerebras\n"
-    text += "• 🔧 Tools supported\n"
+    text += "• 💎 Gemini  • 🌐 OpenRouter\n"
+    text += "• ⚡ Groq  • 🧠 Cerebras\n"
+    text += "• 🔧 Tools  • 🆓 Free\n"
 
     # Show test status
     if test_results:
@@ -2801,7 +2799,7 @@ def _build_models_page(
 
     # Filter row (with tools filter)
     filter_row = []
-    filters = [("all", "All"), ("tools", "🔧"), ("gem", "💎"), ("or", "🌐"), ("groq", "⚡"), ("cere", "🧠")]
+    filters = [("all", "All"), ("free", "🆓"), ("tools", "🔧"), ("gem", "💎"), ("or", "🌐"), ("groq", "⚡"), ("cere", "🧠")]
     for f_key, f_label in filters:
         label = f"[{f_label}]" if f_key == filter_type else f_label
         filter_row.append(InlineKeyboardButton(label, callback_data=f"m:f:{f_key}"))
