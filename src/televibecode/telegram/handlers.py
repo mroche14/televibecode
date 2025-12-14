@@ -2713,13 +2713,17 @@ def _build_models_page(
     filter_name = filter_names.get(filter_type, "All")
 
     text = f"🤖 *AI Models* — {filter_name}\n"
-    text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n"
-    text += "💎Gemini 🌐OpenRouter ⚡Groq 🧠Cerebras\n"
+    text += f"Page {page + 1}/{total_pages} ({len(models)} models)\n\n"
+    text += "• 💎 Gemini\n"
+    text += "• 🌐 OpenRouter\n"
+    text += "• ⚡ Groq\n"
+    text += "• 🧠 Cerebras\n"
+    text += "• 🔧 Tools supported\n"
 
     # Show test status
     if test_results:
         tested_count = len(test_results)
-        text += f"🧪 {tested_count} tested | 🔧=tools ❌=no tools\n"
+        text += f"\n🧪 {tested_count} models tested\n"
 
     # Show current model
     if current_model_id:
