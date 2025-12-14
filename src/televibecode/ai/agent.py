@@ -668,14 +668,45 @@ class TeleVibeAgent:
             session_id = action.params["session_id"]
             instruction = action.params["instruction"]
 
-            # This would trigger the job runner
-            # For now, return a placeholder - the actual execution
-            # should be handled by the job system
-            return (
-                f"🚀 Starting job in **{session_id}**:\n\n"
-                f"`{instruction[:100]}`\n\n"
-                f"I'll notify you when it's done."
+            # Get settings from context
+            ctx = self.get_chat_context(chat_id)
+            settings = ctx.get("settings")
+            if not settings:
+                return "Missing settings context. Please try again."
+
+            # Import and run the job
+            from televibecode.runner import run_instruction
+
+            log.info(
+                "agent_starting_job",
+                session_id=session_id,
+                instruction=instruction[:50],
+                chat_id=chat_id,
             )
+
+            try:
+                job = await run_instruction(
+                    db=self.db,
+                    settings=settings,
+                    session_id=session_id,
+                    instruction=instruction,
+                )
+
+                log.info(
+                    "agent_job_started",
+                    job_id=job.job_id,
+                    session_id=session_id,
+                )
+
+                return (
+                    f"🚀 Job **{job.job_id}** started in **{session_id}**!\n\n"
+                    f"📝 `{instruction[:80]}`\n\n"
+                    f"Use `/summary {job.job_id}` or `/tail {job.job_id}` to check progress."
+                )
+
+            except ValueError as e:
+                log.error("agent_job_failed", error=str(e), session_id=session_id)
+                return f"❌ Failed to start job: {e}"
 
         elif action.action_type == "cancel_job":
             job_id = action.params["job_id"]
@@ -683,8 +714,28 @@ class TeleVibeAgent:
             return f"⏹️ Job **{job_id[:8]}** cancelled."
 
         elif action.action_type == "scan_projects":
-            # Would need projects_root from settings
-            return "🔍 Scanning for projects... (not implemented in agent yet)"
+            # Get settings from context
+            ctx = self.get_chat_context(chat_id)
+            settings = ctx.get("settings")
+            if not settings:
+                return "Missing settings context. Please try again."
+
+            from televibecode.orchestrator.tools import projects
+
+            log.info("agent_scanning_projects", root=str(settings.televibe_root))
+
+            result = await projects.scan_projects(self.db, settings.televibe_root)
+
+            log.info("agent_scan_complete", found=result["found"])
+
+            if result["found"] == 0:
+                return "🔍 No new git repositories found."
+
+            lines = [f"🔍 Found **{result['found']}** repositories:\n"]
+            for p in result["details"]["registered"][:10]:
+                lines.append(f"• {p['name']}")
+
+            return "\n".join(lines)
 
         elif action.action_type == "claim_task":
             task_id = action.params["task_id"]
