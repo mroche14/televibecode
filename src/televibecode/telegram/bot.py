@@ -21,6 +21,8 @@ from televibecode.telegram.handlers import (
     approvals_command,
     cancel_command,
     claim_task_command,
+    cleanup_callback_handler,
+    cleanup_sessions_command,
     close_session_command,
     command_callback_handler,
     handle_reply_message,
@@ -160,6 +162,7 @@ class TeleVibeBot:
             BotCommand("new", "Create a new session"),
             BotCommand("use", "Switch to a session"),
             BotCommand("close", "Close a session"),
+            BotCommand("cleanup", "Close all sessions"),
             BotCommand("status", "Show session status"),
             BotCommand("tasks", "List tasks"),
             BotCommand("next", "Show next tasks"),
@@ -201,6 +204,9 @@ class TeleVibeBot:
         self.app.add_handler(CommandHandler("use", use_session_command, filters=auth))
         self.app.add_handler(
             CommandHandler("close", close_session_command, filters=auth)
+        )
+        self.app.add_handler(
+            CommandHandler("cleanup", cleanup_sessions_command, filters=auth)
         )
         self.app.add_handler(CommandHandler("status", status_command, filters=auth))
 
@@ -286,6 +292,13 @@ class TeleVibeBot:
             CallbackQueryHandler(
                 self._auth_callback_wrapper(agent_callback_handler),
                 pattern="^agent:",
+            )
+        )
+        # Cleanup confirmation handler
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(cleanup_callback_handler),
+                pattern="^cleanup:",
             )
         )
 

@@ -59,6 +59,8 @@ __all__ = [
     "new_session_command",
     "use_session_command",
     "close_session_command",
+    "cleanup_sessions_command",
+    "cleanup_callback_handler",
     "status_command",
     "handle_reply_message",
     "session_callback_handler",
@@ -145,6 +147,7 @@ def build_session_keyboard(
         action_row = [
             InlineKeyboardButton("📊 Status", callback_data="session:status"),
             InlineKeyboardButton("🔄 Refresh", callback_data="session:refresh"),
+            InlineKeyboardButton("🗑️ Cleanup", callback_data="cleanup:confirm"),
         ]
         buttons.append(action_row)
 
@@ -767,6 +770,108 @@ async def close_session_command(
             f"Failed to close session: {e}\n\n_Use `--force` to force close._",
             parse_mode="Markdown",
         )
+
+
+async def cleanup_sessions_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /cleanup command - close all sessions.
+
+    Usage: /cleanup [--force]
+    """
+    db = get_db(context)
+    args = context.args or []
+    force = "--force" in args or "-f" in args
+
+    # Get all active sessions
+    all_sessions = await db.get_active_sessions()
+
+    if not all_sessions:
+        await update.message.reply_text("No active sessions to clean up.")
+        return
+
+    if not force:
+        # Ask for confirmation
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"🗑️ Yes, close all {len(all_sessions)} sessions",
+                    callback_data="cleanup:confirm",
+                ),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cleanup:cancel")],
+        ])
+
+        session_list = "\n".join(
+            f"• `{s.session_id}` - {s.project_id}" for s in all_sessions[:10]
+        )
+        if len(all_sessions) > 10:
+            session_list += f"\n... and {len(all_sessions) - 10} more"
+
+        await update.message.reply_text(
+            f"⚠️ *Close all {len(all_sessions)} sessions?*\n\n"
+            f"{session_list}\n\n"
+            f"This will remove all worktrees.",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
+    # Force cleanup - do it directly
+    await _do_cleanup_all_sessions(update, context, all_sessions)
+
+
+async def _do_cleanup_all_sessions(update, context, all_sessions) -> None:
+    """Actually perform the cleanup of all sessions."""
+    db = get_db(context)
+    chat_state = get_chat_state(context)
+    chat_id = update.effective_chat.id
+
+    closed = 0
+    failed = 0
+    errors = []
+
+    for session in all_sessions:
+        try:
+            await sessions.close_session(db=db, session_id=session.session_id, force=True)
+            closed += 1
+            log.info("cleanup_session_closed", session_id=session.session_id)
+        except Exception as e:
+            failed += 1
+            errors.append(f"{session.session_id}: {e}")
+            log.error("cleanup_session_failed", session_id=session.session_id, error=str(e))
+
+    # Clear active session
+    chat_state.set_active_session(chat_id, None)
+
+    msg = f"🧹 *Cleanup Complete*\n\n✅ Closed: {closed}\n❌ Failed: {failed}"
+    if errors:
+        msg += f"\n\nErrors:\n" + "\n".join(errors[:5])
+
+    # Handle both message and callback query
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cleanup_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle cleanup confirmation callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data  # cleanup:confirm or cleanup:cancel
+
+    if data == "cleanup:cancel":
+        await query.edit_message_text("Cleanup cancelled.")
+        return
+
+    if data == "cleanup:confirm":
+        db = get_db(context)
+        all_sessions = await db.get_active_sessions()
+        await _do_cleanup_all_sessions(update, context, all_sessions)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
