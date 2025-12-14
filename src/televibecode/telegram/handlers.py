@@ -2731,7 +2731,7 @@ def _build_models_page(
             short_id = current_model_id[:30] + "..."
         else:
             short_id = current_model_id
-        text += f"\n📍 `{short_id}`"
+        text += f"\n📍 Current: `{short_id}`"
 
     # Build button list (1 per row, left-aligned with padding)
     keyboard_rows = []
