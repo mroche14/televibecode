@@ -9,6 +9,7 @@ Phase 3: Task System    →  Backlog.md integration
 Phase 4: Job Execution  →  Claude Code runner + streaming
 Phase 5: Approvals      →  Gated actions + inline buttons
 Phase 6: Polish         →  Middle AI + natural language
+Phase 7: Hot-Reload     →  Separate receiver from logic + self-restart
 ```
 
 ---
@@ -453,6 +454,7 @@ dev = [
 | M4.5: Live Progress | 4 | See progress updates in real-time |
 | M5: First Approval | 5 | Approve git push inline |
 | M6: First NL | 6 | "fix the bug" works naturally |
+| M7: Self-Restart | 7 | `/restart` reloads logic without dropping Telegram |
 
 ---
 
@@ -474,3 +476,109 @@ dev = [
 - [ ] **ForceReply for clarification**
 - [ ] Handles multiple concurrent sessions
 - [ ] Survives restarts gracefully
+
+---
+
+## Phase 7: Hot-Reload Architecture
+
+### Goals
+- Separate Telegram receiver from application logic
+- Enable code hot-reloading without losing Telegram connection
+- Self-restart capability when code changes are made
+- Zero-downtime deployments
+
+### Problem Statement
+Currently, when TeleVibeCode's code is modified (e.g., by Claude Code itself), the entire application must be manually restarted. This breaks the feedback loop when using TeleVibeCode to develop itself. We need an architecture that allows the "brain" (logic layer) to be restarted independently from the "ears" (Telegram receiver).
+
+### Architecture Options
+
+#### Option A: FastAPI + WebSocket Bridge
+```
+Telegram Bot (stable process)
+    ↓ WebSocket
+FastAPI Server (restartable with uvicorn --reload)
+    ↓
+Orchestrator MCP + Logic
+```
+
+#### Option B: Message Queue Architecture
+```
+Telegram Bot (stable listener)
+    ↓ Redis/ZMQ queue
+Worker Process (restartable)
+    ↓
+Orchestrator MCP + Logic
+```
+
+#### Option C: Unix Socket IPC
+```
+Telegram Bot (stable process)
+    ↓ Unix socket
+Logic Server (restartable)
+    ↓
+Orchestrator MCP + Logic
+```
+
+### Tasks
+
+#### 7.1 Architecture Selection
+- [ ] Evaluate options based on:
+  - Complexity vs benefit
+  - Latency requirements
+  - State management
+  - Development experience
+- [ ] Prototype preferred approach
+- [ ] Document decision
+
+#### 7.2 Receiver/Logic Separation
+- [ ] Extract Telegram polling into minimal stable process
+- [ ] Create message passing interface (WebSocket/queue/socket)
+- [ ] Move all logic processing to separate restartable service
+- [ ] Handle reconnection gracefully
+
+#### 7.3 Hot-Reload Support
+- [ ] Integrate with uvicorn `--reload` or similar
+- [ ] Watch for file changes in src/ directory
+- [ ] Automatic restart on code changes
+- [ ] Preserve Telegram connection during restart
+
+#### 7.4 Self-Restart Capability
+- [ ] `/restart` command in Telegram
+- [ ] Graceful shutdown of logic layer
+- [ ] Automatic restart with new code
+- [ ] Health check after restart
+- [ ] Rollback on failed restart
+
+#### 7.5 State Preservation
+- [ ] Persist in-flight jobs during restart
+- [ ] Resume job monitoring after restart
+- [ ] Maintain session context
+- [ ] Queue messages during restart window
+
+### Deliverables
+- TeleVibeCode can modify its own code and apply changes
+- Zero-downtime code updates
+- `/restart` command for manual restarts
+- File watcher for automatic hot-reload
+- Preserved Telegram connection during restarts
+
+### Technical Notes
+
+**Why uvicorn?**
+- Built-in file watching and hot-reload
+- Production-ready ASGI server
+- Works well with async Python
+- Can run alongside MCP server
+
+**State Considerations:**
+- SQLite handles persistence (already async)
+- In-memory state must be minimal or serializable
+- Telegram bot token/connection stays in stable process
+- Job subprocess handles need careful handoff
+
+### Success Criteria
+- [ ] Can run `/restart` and logic restarts within 5 seconds
+- [ ] Telegram connection never drops during restart
+- [ ] File changes trigger automatic reload in dev mode
+- [ ] No lost messages during restart window
+- [ ] TeleVibeCode can successfully modify and reload itself
