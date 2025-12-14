@@ -348,11 +348,11 @@ class TeleVibeAgent:
                 action_type="create_session",
                 description=f"Create new session for {project_id}",
                 params={"project_id": project_id},
-                confirm_message=f"Create new session for **{project_id}**?",
+                confirm_message=f"📂 Create new session for **{project.name}**?\n📁 Path: `{project.path}`",
             )
             set_pending_action(chat_id, action)
 
-            return f"CONFIRM_NEEDED: Create new session for {project_id}?"
+            return f"CONFIRM_NEEDED: Create new session for **{project.name}**?"
 
         @tool(description="Close a coding session. REQUIRES CONFIRMATION.")
         async def close_session(session_id: str | None = None) -> str:
@@ -371,16 +371,20 @@ class TeleVibeAgent:
             if not session:
                 return f"Session {sid} not found."
 
+            # Get project name
+            project = await db.get_project(session.project_id)
+            project_name = project.name if project else session.project_id
+
             action = PendingAction(
                 action_id=f"close_session_{sid}",
                 action_type="close_session",
                 description=f"Close session {sid}",
                 params={"session_id": sid},
-                confirm_message=f"Close session **{sid}** ({session.project_id})?",
+                confirm_message=f"🗑️ Close session **{sid}**?\n📂 Project: **{project_name}**\n🌿 Branch: `{session.branch}`",
             )
             set_pending_action(chat_id, action)
 
-            return f"CONFIRM_NEEDED: Close session {sid}?"
+            return f"CONFIRM_NEEDED: Close **{sid}** ({project_name})?"
 
         @tool(description="Run a coding instruction in the current session. REQUIRES CONFIRMATION.")
         async def run_instruction(instruction: str) -> str:
@@ -393,11 +397,15 @@ class TeleVibeAgent:
             sid = ctx.get("active_session")
 
             if not sid:
-                return "No active session. Create or switch to a session first."
+                return "No active session. Create or switch to a session first with /new or /use."
 
             session = await db.get_session(sid)
             if not session:
                 return f"Session {sid} not found."
+
+            # Get project name for context
+            project = await db.get_project(session.project_id)
+            project_name = project.name if project else session.project_id
 
             # Truncate for display
             display = instruction[:100] + "..." if len(instruction) > 100 else instruction
@@ -407,11 +415,11 @@ class TeleVibeAgent:
                 action_type="run_instruction",
                 description=f"Run: {display}",
                 params={"session_id": sid, "instruction": instruction},
-                confirm_message=f"Run in **{sid}**:\n\n`{display}`",
+                confirm_message=f"📂 **{project_name}** / `{sid}`\n🌿 Branch: `{session.branch}`\n\n`{display}`",
             )
             set_pending_action(chat_id, action)
 
-            return f"CONFIRM_NEEDED: Run '{display}' in {sid}?"
+            return f"CONFIRM_NEEDED: Run in **{sid}** ({project_name})?\n\n`{display}`"
 
         @tool(description="Cancel the currently running job. REQUIRES CONFIRMATION.")
         async def cancel_job(job_id: str | None = None) -> str:
@@ -534,10 +542,19 @@ class TeleVibeAgent:
         try:
             agent = self._get_agent(chat_id)
 
-            # Add context to message
+            # Add context to message - include session AND project for clarity
             ctx = self.get_chat_context(chat_id)
             active = ctx.get("active_session")
-            context_note = f"\n[Context: active_session={active}]" if active else ""
+            context_note = ""
+            if active:
+                # Get project name for context
+                session = await self.db.get_session(active)
+                if session:
+                    project = await self.db.get_project(session.project_id)
+                    project_name = project.name if project else session.project_id
+                    context_note = f"\n[Context: session={active}, project={project_name}, branch={session.branch}]"
+                else:
+                    context_note = f"\n[Context: session={active}]"
 
             # Run agent
             response = await agent.arun(message + context_note)
@@ -784,15 +801,22 @@ TeleVibeCode lets developers control Claude Code sessions from Telegram. You hel
 - Always use the tools available to you - don't make things up
 - If you're not sure what they want, ask a clarifying question
 
+## CRITICAL: Session Context Awareness
+- ALWAYS check and mention which session/project will be affected before any action
+- If no session is active, tell the user and ask them to create or select one
+- When confirming write operations, ALWAYS include: session ID AND project name
+- If the user mentions a different project than the active session, ASK for clarification
+- Never assume - if ambiguous, ask "Did you mean S1 (myproject) or S2 (otherapp)?"
+
 ## Examples of Good Responses
 User: "what sessions do I have"
-You: *call list_sessions* "You have 2 sessions: S1 on televibecode (idle) and S2 on myproject (running a job)"
-
-User: "start working on televibecode"
-You: *call create_session* "Create a new session for televibecode?" (wait for confirm)
+You: *call list_sessions* "You have 2 sessions: S1 on televibecode (idle) and S2 on myproject (running)"
 
 User: "run the tests"
-You: *call run_instruction("pytest")* "Run pytest in S1?" (wait for confirm)
+You: *call run_instruction("pytest")* "Run pytest in **S1 (televibecode)**?" (wait for confirm)
+
+User: "add a login page" (but active session is on a CLI tool project)
+You: "Your active session S1 is on **cli-tool** - did you mean to run this there, or should I switch to a web project first?"
 
 User: "yo"
 You: "Hey! What are we working on today?"
@@ -802,6 +826,7 @@ You: "Hey! What are we working on today?"
 - If they say yes/confirm/do it after you ask, that means proceed
 - Don't repeat yourself or over-explain
 - Be a helpful coding buddy, not a formal assistant
+- ALWAYS be explicit about which session/project will be affected
 """
 
 
