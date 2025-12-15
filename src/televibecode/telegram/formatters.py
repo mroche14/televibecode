@@ -139,9 +139,9 @@ def format_project_list(projects: list[dict]) -> str:
         icon = "📂" if p.get("backlog_enabled") else "📁"
 
         text += f"{icon} `{p['project_id']}`\n"
-        text += f"   {p['name']}\n"
-        text += f"   📍 {_truncate_path(p['path'])}\n"
-        text += f"   🌿 {p['default_branch']}\n\n"
+        text += f"   {escape_markdown(p['name'])}\n"
+        text += f"   📍 {escape_markdown(_truncate_path(p['path']))}\n"
+        text += f"   🌿 {escape_markdown(p['default_branch'])}\n\n"
 
     text += f"_Total: {len(projects)} project(s)_"
     return text
@@ -194,8 +194,9 @@ def format_session_card(session: Session, project_name: str) -> str:
     state_icon = _session_state_icon(session.state)
     branch_escaped = escape_markdown(session.branch)
     project_escaped = escape_markdown(project_name)
+    session_escaped = escape_markdown(session.session_id)
 
-    text = f"📂 {project_escaped} 🔹 {session.session_id} 🌿 {branch_escaped}\n\n"
+    text = f"📂 {project_escaped} 🔹 {session_escaped} 🌿 {branch_escaped}\n\n"
     text += f"*State*: {state_icon} {session.state.value}\n"
     text += f"*Last Activity*: {_relative_time(session.last_activity_at)}\n"
 

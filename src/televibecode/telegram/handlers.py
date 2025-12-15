@@ -390,7 +390,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text = f"Found {result['found']} repositories.\n\n"
         text += f"*Registered*: {len(result['details']['registered'])}\n"
         for p in result["details"]["registered"]:
-            text += f"  • `{p['project_id']}` - {p['name']}\n"
+            text += f"  • `{p['project_id']}` - {escape_markdown(p['name'])}\n"
 
         if result["details"]["skipped"]:
             skipped_count = len(result["details"]["skipped"])
@@ -399,7 +399,9 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if result["details"]["errors"]:
             text += f"\n*Errors*: {len(result['details']['errors'])}\n"
             for e in result["details"]["errors"]:
-                text += f"  • {e['path']}: {e['error']}\n"
+                path = escape_markdown(e['path'])
+                err = escape_markdown(e['error'])
+                text += f"  • {path}: {err}\n"
 
         await update.message.reply_text(text, parse_mode="Markdown")
     else:
@@ -556,14 +558,16 @@ async def newproject_callback_handler(
         # Build success message
         msg_lines = [
             "✅ *Project created!*\n",
-            f"📂 `{result['path']}`",
+            f"📂 `{escape_markdown(result['path'])}`",
         ]
         if result.get("remote_url"):
-            msg_lines.append(f"🌐 {result['remote_url']}")
+            msg_lines.append(f"🌐 {escape_markdown(result['remote_url'])}")
+        sid = escape_markdown(session_result['session_id'])
+        branch = escape_markdown(session_result['branch'])
         msg_lines.extend(
             [
-                f"\n🔹 Session `{session_result['session_id']}` created",
-                f"🌿 Branch: `{session_result['branch']}`",
+                f"\n🔹 Session `{sid}` created",
+                f"🌿 Branch: `{branch}`",
                 "\nReady for instructions!",
             ]
         )
@@ -701,10 +705,11 @@ async def new_session_command(
         mode_name = "direct" if execution_mode == ExecutionMode.DIRECT else "worktree"
         text = (
             f"*Session Created*\n\n"
-            f"📂 `{result['session_id']}` on `{result['project_name']}`\n"
-            f"🌿 Branch: `{result['branch']}`\n"
+            f"📂 `{escape_markdown(result['session_id'])}` on "
+            f"`{escape_markdown(result['project_name'])}`\n"
+            f"🌿 Branch: `{escape_markdown(result['branch'])}`\n"
             f"{mode_icon} Mode: {mode_name}\n"
-            f"📍 {result['workspace_path']}\n\n"
+            f"📍 {escape_markdown(result['workspace_path'])}\n\n"
             f"_This is now your active session._"
         )
         await send_with_context(
@@ -1269,13 +1274,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     icon = "❌"
                 else:
                     icon = "🔧"
-                text += f"  {icon} {j['instruction']}\n"
+                text += f"  {icon} {safe_inline(j['instruction'], max_len=80)}\n"
 
         # Last summary
         if status.get("last_summary"):
-            summary = status["last_summary"][:150]
-            if len(status["last_summary"]) > 150:
-                summary += "..."
+            summary = safe_inline(status['last_summary'], max_len=150)
             text += f"\n*Last Summary*:\n{summary}"
 
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -1432,9 +1435,9 @@ async def session_callback_handler(
         try:
             status = await sessions.get_session_status(db, active)
 
-            text = f"*Session {active}*\n\n"
-            text += f"📂 {status['project_name']}\n"
-            text += f"🌿 Branch: `{status['branch']}`\n"
+            text = f"*Session {escape_markdown(active)}*\n\n"
+            text += f"📂 {escape_markdown(status['project_name'])}\n"
+            text += f"🌿 Branch: `{escape_markdown(status['branch'])}`\n"
             text += f"🔹 State: {status['state']}\n"
 
             git = status.get("git_status")
@@ -1585,12 +1588,12 @@ def format_task_list(task_list: list[dict], title: str = "Tasks") -> str:
         status_icon = _task_status_icon(TaskStatus(task["status"]))
 
         text += f"{priority_icon} `{task['task_id']}` {status_icon}\n"
-        text += f"   {task['title']}\n"
+        text += f"   {escape_markdown(task['title'])}\n"
 
         if task.get("epic"):
-            text += f"   📁 {task['epic']}\n"
+            text += f"   📁 {escape_markdown(task['epic'])}\n"
         if task.get("session_id"):
-            text += f"   🔗 {task['session_id']}\n"
+            text += f"   🔗 {escape_markdown(task['session_id'])}\n"
 
         text += "\n"
 
@@ -1764,8 +1767,8 @@ async def claim_task_command(
         await update.message.reply_text(
             f"*Task Claimed*\n\n"
             f"📋 `{result['task_id']}`\n"
-            f"📝 {result['title']}\n"
-            f"🔗 Session: `{result['session_id']}`\n"
+            f"📝 {escape_markdown(result['title'])}\n"
+            f"🔗 Session: `{escape_markdown(result['session_id'])}`\n"
             f"📊 Status: {result['status']}",
             parse_mode="Markdown",
         )
@@ -1853,14 +1856,14 @@ async def task_callback_handler(
         status_icon = _task_status_icon(TaskStatus(task_detail["status"]))
 
         text = f"*Task {task_id}*\n\n"
-        text += f"📝 *{task_detail['title']}*\n\n"
+        text += f"📝 *{safe_inline(task_detail['title'])}*\n\n"
         text += f"{priority_icon} Priority: {task_detail['priority']}\n"
         text += f"{status_icon} Status: {task_detail['status']}\n"
 
         if task_detail.get("epic"):
-            text += f"📁 Epic: {task_detail['epic']}\n"
+            text += f"📁 Epic: {escape_markdown(task_detail['epic'])}\n"
         if task_detail.get("assignee"):
-            text += f"👤 Assignee: {task_detail['assignee']}\n"
+            text += f"👤 Assignee: {escape_markdown(task_detail['assignee'])}\n"
         if task_detail.get("session_id"):
             text += f"🔗 Session: {escape_markdown(task_detail['session_id'])}\n"
         if task_detail.get("branch"):
@@ -1926,8 +1929,8 @@ async def task_callback_handler(
             await query.edit_message_text(
                 f"*Task Claimed*\n\n"
                 f"📋 `{result['task_id']}`\n"
-                f"📝 {result['title']}\n"
-                f"🔗 Session: `{result['session_id']}`",
+                f"📝 {escape_markdown(result['title'])}\n"
+                f"🔗 Session: `{escape_markdown(result['session_id'])}`",
                 parse_mode="Markdown",
             )
 
@@ -1944,7 +1947,7 @@ async def task_callback_handler(
             await query.edit_message_text(
                 f"*Status Updated*\n\n"
                 f"📋 `{result['task_id']}`\n"
-                f"📝 {result['title']}\n"
+                f"📝 {escape_markdown(result['title'])}\n"
                 f"📊 {result['old_status']} → {result['new_status']}",
                 parse_mode="Markdown",
             )
@@ -4492,11 +4495,13 @@ async def _execute_command(
             # Set as active session
             chat_state.set_active_session(chat_id, session_result["session_id"])
 
+            sid = escape_markdown(session_result['session_id'])
+            branch = escape_markdown(session_result['branch'])
             await send(
                 f"✅ Project created!\n\n"
-                f"📂 `{result['path']}`\n"
-                f"🔹 Session `{session_result['session_id']}` created\n"
-                f"🌿 Branch: `{session_result['branch']}`\n\n"
+                f"📂 `{escape_markdown(result['path'])}`\n"
+                f"🔹 Session `{sid}` created\n"
+                f"🌿 Branch: `{branch}`\n\n"
                 f"Ready for instructions!"
             )
         except ValueError as e:
