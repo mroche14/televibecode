@@ -1706,12 +1706,12 @@ async def next_tasks_command(
         for i, task in enumerate(task_list, 1):
             priority_icon = _task_priority_icon(TaskPriority(task["priority"]))
             text += f"{i}. {priority_icon} `{task['task_id']}`\n"
-            text += f"   *{task['title']}*\n"
+            text += f"   *{escape_markdown(task['title'])}*\n"
             if task.get("description"):
-                desc = task["description"][:100]
+                desc = task["description"][:100].replace('\n', ' ')
                 if len(task["description"]) > 100:
                     desc += "..."
-                text += f"   _{desc}_\n"
+                text += f"   _{escape_markdown(desc)}_\n"
             text += "\n"
 
         keyboard = build_task_keyboard(task_list)
@@ -1864,12 +1864,13 @@ async def task_callback_handler(
         if task_detail.get("assignee"):
             text += f"👤 Assignee: {task_detail['assignee']}\n"
         if task_detail.get("session_id"):
-            text += f"🔗 Session: {task_detail['session_id']}\n"
+            text += f"🔗 Session: {escape_markdown(task_detail['session_id'])}\n"
         if task_detail.get("branch"):
-            text += f"🌿 Branch: {task_detail['branch']}\n"
+            text += f"🌿 Branch: {escape_markdown(task_detail['branch'])}\n"
 
         if task_detail.get("description"):
-            text += f"\n_{task_detail['description'][:300]}_"
+            desc = task_detail['description'][:300].replace('\n', ' ')
+            text += f"\n_{escape_markdown(desc)}_"
 
         # Build action buttons
         buttons = []
@@ -2222,9 +2223,12 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for job in jobs_list:
             icon = _job_status_icon(JobStatus(job["status"]))
             text += f"{icon} `{job['job_id']}` - {job['status']}\n"
-            text += f"   _{escape_markdown(job['instruction'])}_\n"
+            # Replace newlines to prevent breaking underscore italic formatting
+            instr = job['instruction'].replace('\n', ' ')[:100]
+            text += f"   _{escape_markdown(instr)}_\n"
             if job.get("error"):
-                text += f"   ❌ {escape_markdown(job['error'][:50])}\n"
+                err = job['error'].replace('\n', ' ')[:50]
+                text += f"   ❌ {escape_markdown(err)}\n"
             text += "\n"
 
         text += f"_Total: {len(jobs_list)} job(s)_"
@@ -2525,11 +2529,13 @@ async def approvals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             icon = _approval_type_icon(a["approval_type"])
             atype = a["approval_type"].replace("_", " ").title()
             text += f"{icon} `{a['approval_id']}` - {atype}\n"
-            text += f"   📂 `{a['session_id']}` / `{a['job_id']}`\n"
-            desc = a["action_description"][:60]
+            text += (
+                f"   📂 `{escape_markdown(a['session_id'])}` / `{a['job_id']}`\n"
+            )
+            desc = a["action_description"][:60].replace('\n', ' ')
             if len(a["action_description"]) > 60:
                 desc += "..."
-            text += f"   _{desc}_\n\n"
+            text += f"   _{escape_markdown(desc)}_\n\n"
 
         text += f"_Total: {len(pending)} pending approval(s)_"
 
@@ -2663,7 +2669,9 @@ async def approval_callback_handler(
             text += f"🔹 Job: `{detail['job_id']}`\n"
             text += f"📊 State: {detail['state']}\n\n"
 
-            action_desc = escape_markdown(detail['action_description'])
+            action_desc = escape_markdown(
+                detail['action_description'].replace('\n', ' ')
+            )
             text += f"*Action*:\n_{action_desc}_\n\n"
 
             details = detail.get("action_details")
@@ -2671,12 +2679,15 @@ async def approval_callback_handler(
                 text += "*Details*:\n"
                 if isinstance(details, dict):
                     for k, v in details.items():
-                        text += f"  • {k}: `{escape_markdown(str(v)[:50])}`\n"
+                        val = str(v)[:50].replace('\n', ' ')
+                        text += f"  • {k}: `{escape_markdown(val)}`\n"
                 text += "\n"
 
             job = detail.get("job")
             if job and job.get("instruction"):
-                instr = escape_markdown(job['instruction'][:150])
+                instr = escape_markdown(
+                    job['instruction'][:150].replace('\n', ' ')
+                )
                 text += f"*Job Instruction*:\n_{instr}_\n"
 
             # Show action buttons if still pending
@@ -3180,7 +3191,7 @@ async def _monitor_job_completion(
 
                 summary_text = ""
                 if job.result_summary:
-                    summary = job.result_summary[:200]
+                    summary = job.result_summary[:200].replace('\n', ' ')
                     if len(job.result_summary) > 200:
                         summary += "..."
                     summary_text = f"\n\n💬 _{escape_markdown(summary)}_"
@@ -3198,7 +3209,7 @@ async def _monitor_job_completion(
             elif job.status == JobStatus.FAILED:
                 error_text = ""
                 if job.error:
-                    error = job.error[:200]
+                    error = job.error[:200].replace('\n', ' ')
                     if len(job.error) > 200:
                         error += "..."
                     error_text = f"\n\n❗ _{escape_markdown(error)}_"
@@ -4228,8 +4239,10 @@ async def voice_message_handler(
             context.bot_data["voice_transcriptions"] = {}
         context.bot_data["voice_transcriptions"][chat_id] = transcribed_text
 
+        # Escape for markdown display (but keep original for processing)
+        display_text = escape_markdown(transcribed_text.replace('\n', ' '))
         await update.message.reply_text(
-            f"🎤 *Transcribed:*\n_{transcribed_text}_\n\n"
+            f"🎤 *Transcribed:*\n_{display_text}_\n\n"
             "Confirm to process this message:",
             parse_mode="Markdown",
             reply_markup=keyboard,
@@ -4636,9 +4649,10 @@ async def voice_confirm_callback_handler(
             return
 
         # Update message to show processing
+        display_text = escape_markdown(transcribed_text.replace('\n', ' '))
         with contextlib.suppress(BadRequest):
             await query.edit_message_text(
-                f"🎤 Processing: _{transcribed_text}_",
+                f"🎤 Processing: _{display_text}_",
                 parse_mode="Markdown",
             )
 
@@ -4722,7 +4736,8 @@ async def _process_with_suggestions(
         # For single high-confidence suggestion, make it prominent
         if len(result.suggestions) == 1 and top.confidence >= 0.8:
             keyboard = _build_suggestion_keyboard(result.suggestions)
-            msg = f"Did you mean:\n\n`{top.command}`\n_{top.description}_"
+            desc = escape_markdown(top.description.replace('\n', ' '))
+            msg = f"Did you mean:\n\n`{top.command}`\n_{desc}_"
         else:
             # Multiple suggestions
             keyboard = _build_suggestion_keyboard(result.suggestions)
