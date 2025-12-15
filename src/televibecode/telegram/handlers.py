@@ -1099,7 +1099,9 @@ async def cleanup_sessions_command(
         )
 
         session_list = "\n".join(
-            f"• `{s.session_id}` - {s.project_id}" for s in all_sessions[:10]
+            f"• `{escape_markdown(s.session_id)}` - "
+            f"{escape_markdown(s.project_id)}"
+            for s in all_sessions[:10]
         )
         if len(all_sessions) > 10:
             session_list += f"\n... and {len(all_sessions) - 10} more"
@@ -2657,23 +2659,25 @@ async def approval_callback_handler(
             text = "*Approval Details*\n\n"
             text += f"🔹 ID: `{detail['approval_id']}`\n"
             text += f"{icon} Type: {atype}\n"
-            text += f"📂 Session: `{detail['session_id']}`\n"
+            text += f"📂 Session: `{escape_markdown(detail['session_id'])}`\n"
             text += f"🔹 Job: `{detail['job_id']}`\n"
             text += f"📊 State: {detail['state']}\n\n"
 
-            text += f"*Action*:\n_{detail['action_description']}_\n\n"
+            action_desc = escape_markdown(detail['action_description'])
+            text += f"*Action*:\n_{action_desc}_\n\n"
 
             details = detail.get("action_details")
             if details:
                 text += "*Details*:\n"
                 if isinstance(details, dict):
                     for k, v in details.items():
-                        text += f"  • {k}: `{str(v)[:50]}`\n"
+                        text += f"  • {k}: `{escape_markdown(str(v)[:50])}`\n"
                 text += "\n"
 
             job = detail.get("job")
             if job and job.get("instruction"):
-                text += f"*Job Instruction*:\n_{job['instruction'][:150]}_\n"
+                instr = escape_markdown(job['instruction'][:150])
+                text += f"*Job Instruction*:\n_{instr}_\n"
 
             # Show action buttons if still pending
             if detail["state"] == "pending":
@@ -4293,7 +4297,10 @@ async def _execute_command(
                 state_emoji = {"idle": "💤", "running": "🔄", "paused": "⏸️"}.get(
                     s.state.value, "❓"
                 )
-                lines.append(f"{state_emoji} `{s.session_id}` - {s.project_id}")
+                lines.append(
+                    f"{state_emoji} `{escape_markdown(s.session_id)}` - "
+                    f"{escape_markdown(s.project_id)}"
+                )
             await send("\n".join(lines), parse_mode="Markdown")
         return True
 
@@ -4304,7 +4311,10 @@ async def _execute_command(
         else:
             lines = ["**Registered Projects:**\n"]
             for p in all_projects:
-                lines.append(f"📂 `{p.project_id}` - {p.path}")
+                lines.append(
+                    f"📂 `{escape_markdown(p.project_id)}` - "
+                    f"{escape_markdown(p.path)}"
+                )
             await send("\n".join(lines), parse_mode="Markdown")
         return True
 
