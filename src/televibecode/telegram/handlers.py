@@ -58,7 +58,11 @@ from televibecode.runner import (
     list_session_jobs,
     run_instruction,
 )
-from televibecode.telegram.formatters import format_project_list, format_session_list
+from televibecode.telegram.formatters import (
+    escape_markdown,
+    format_project_list,
+    format_session_list,
+)
 from televibecode.telegram.state import ChatStateManager
 
 log = structlog.get_logger()
@@ -200,21 +204,6 @@ def build_session_keyboard(
         buttons.append(action_row)
 
     return InlineKeyboardMarkup(buttons)
-
-
-def escape_markdown(text: str) -> str:
-    """Escape special Markdown characters for Telegram.
-
-    Args:
-        text: Text to escape.
-
-    Returns:
-        Escaped text safe for Markdown parsing.
-    """
-    # Escape characters that can break Telegram Markdown
-    for char in ['_', '*', '[', ']', '`']:
-        text = text.replace(char, f'\\{char}')
-    return text
 
 
 def get_db(context: ContextTypes.DEFAULT_TYPE) -> Database:
@@ -751,8 +740,9 @@ async def use_session_command(
             session = await db.get_session(current)
             if session:
                 text = (
-                    f"Active session: `{current}` "
-                    f"({session.project_id}/{session.branch})\n\n"
+                    f"Active session: `{escape_markdown(current)}` "
+                    f"({escape_markdown(session.project_id)}"
+                    f"/{escape_markdown(session.branch)})\n\n"
                     f"Use `/use <session_id>` to switch."
                 )
                 await update.message.reply_text(text, parse_mode="Markdown")
@@ -772,7 +762,7 @@ async def use_session_command(
     session = await db.get_session(session_id)
     if not session:
         await update.message.reply_text(
-            f"Session `{session_id}` not found.\n\n"
+            f"Session `{escape_markdown(session_id)}` not found.\n\n"
             f"Use `/sessions` to see available sessions.",
             parse_mode="Markdown",
         )
@@ -788,9 +778,9 @@ async def use_session_command(
     await send_with_context(
         update,
         context,
-        f"*Active Session*: `{session_id}`\n\n"
-        f"📂 {project_name}\n"
-        f"🌿 {session.branch}\n"
+        f"*Active Session*: `{escape_markdown(session_id)}`\n\n"
+        f"📂 {escape_markdown(project_name)}\n"
+        f"🌿 {escape_markdown(session.branch)}\n"
         f"🔹 State: {session.state.value}",
         session_id=session_id,
         project_id=session.project_id,
@@ -845,18 +835,18 @@ async def close_session_command(
         has_uncommitted = status.get("has_uncommitted", False)
         base = status.get("base_branch", "main")
 
-        # Build info text
-        text = f"🗑️ *Close session {session_id}?*\n\n"
-        text += f"📂 Project: **{project_name}**\n"
-        text += f"🌿 Branch: `{branch}`\n\n"
+        # Build info text (escape user content for markdown safety)
+        text = f"🗑️ *Close session {escape_markdown(session_id)}?*\n\n"
+        text += f"📂 Project: *{escape_markdown(project_name)}*\n"
+        text += f"🌿 Branch: `{escape_markdown(branch)}`\n\n"
 
         # Status indicators
         if has_uncommitted:
             text += "⚠️ Has uncommitted changes!\n"
         if ahead > 0:
-            text += f"📈 {ahead} commits ahead of {base}\n"
+            text += f"📈 {ahead} commits ahead of {escape_markdown(base)}\n"
         if behind > 0:
-            text += f"📉 {behind} commits behind {base}\n"
+            text += f"📉 {behind} commits behind {escape_markdown(base)}\n"
         if is_pushed:
             text += "☁️ Branch is pushed to origin\n"
         else:
@@ -998,8 +988,8 @@ async def close_callback_handler(
             branch_status = "📌 Branch kept for later"
 
         await query.edit_message_text(
-            f"✅ Session `{session_id}` closed.\n\n"
-            f"🌿 Branch: `{result.get('branch', 'N/A')}`\n"
+            f"✅ Session `{escape_markdown(session_id)}` closed.\n\n"
+            f"🌿 Branch: `{escape_markdown(result.get('branch', 'N/A'))}`\n"
             f"{branch_status}",
             parse_mode="Markdown",
         )
@@ -1040,7 +1030,8 @@ async def push_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         session = await sessions.get_session(db, session_id)
         if not session:
             await update.message.reply_text(
-                f"Session `{session_id}` not found.", parse_mode="Markdown"
+                f"Session `{escape_markdown(session_id)}` not found.",
+                parse_mode="Markdown",
             )
             return
     except ValueError as e:
@@ -1049,7 +1040,8 @@ async def push_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Show pushing status
     status_msg = await update.message.reply_text(
-        f"☁️ Pushing branch `{session.get('branch', 'unknown')}` to origin...",
+        f"☁️ Pushing branch `{escape_markdown(session.get('branch', 'unknown'))}`"
+        " to origin...",
         parse_mode="Markdown",
     )
 
@@ -1058,14 +1050,15 @@ async def push_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         if result.get("pushed"):
             await status_msg.edit_text(
-                f"✅ Pushed `{result.get('branch')}` to origin.\n\n"
-                f"Session: `{session_id}`",
+                f"✅ Pushed `{escape_markdown(result.get('branch'))}` to origin.\n\n"
+                f"Session: `{escape_markdown(session_id)}`",
                 parse_mode="Markdown",
             )
         else:
             error = result.get("error", "Unknown error")
             await status_msg.edit_text(
-                f"❌ Push failed for `{result.get('branch')}`:\n\n{error}",
+                f"❌ Push failed for `{escape_markdown(result.get('branch'))}`:\n\n"
+                f"{escape_markdown(error)}",
                 parse_mode="Markdown",
             )
 
@@ -1213,9 +1206,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         status = await sessions.get_session_status(db, session_id)
 
-        text = f"*Session {session_id}*\n\n"
-        text += f"📂 {status['project_name']}\n"
-        text += f"🌿 Branch: `{status['branch']}`\n"
+        text = f"*Session {escape_markdown(session_id)}*\n\n"
+        text += f"📂 {escape_markdown(status['project_name'])}\n"
+        text += f"🌿 Branch: `{escape_markdown(status['branch'])}`\n"
         text += f"🔹 State: {status['state']}\n"
 
         # Get branch drift status (ahead/behind main, pushed status)
@@ -1229,11 +1222,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             base = branch_status.get("base_branch", "main")
 
             if ahead > 0:
-                text += f"  ⬆️ {ahead} commit(s) ahead of {base}\n"
+                text += f"  ⬆️ {ahead} commit(s) ahead of {escape_markdown(base)}\n"
             if behind > 0:
-                text += f"  ⬇️ {behind} commit(s) behind {base}\n"
+                text += f"  ⬇️ {behind} commit(s) behind {escape_markdown(base)}\n"
             if ahead == 0 and behind == 0:
-                text += f"  ✅ In sync with {base}\n"
+                text += f"  ✅ In sync with {escape_markdown(base)}\n"
 
             # Show pushed status
             if branch_status.get("is_pushed"):
@@ -1247,7 +1240,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 # Truncate if too long
                 if len(last_commit) > 50:
                     last_commit = last_commit[:50] + "..."
-                text += f"  📝 Last: `{last_commit}`\n"
+                text += f"  📝 Last: `{escape_markdown(last_commit)}`\n"
         except Exception:
             pass  # Branch status is optional enhancement
 
@@ -1330,7 +1323,7 @@ async def handle_reply_message(
 
     if not session:
         await update.message.reply_text(
-            f"Session `{session_id}` no longer exists.",
+            f"Session `{escape_markdown(session_id)}` no longer exists.",
             parse_mode="Markdown",
         )
         return
@@ -1377,7 +1370,7 @@ async def session_callback_handler(
         session = await db.get_session(session_id)
         if not session:
             await query.edit_message_text(
-                f"Session `{session_id}` no longer exists.",
+                f"Session `{escape_markdown(session_id)}` no longer exists.",
                 parse_mode="Markdown",
             )
             return
@@ -1396,9 +1389,9 @@ async def session_callback_handler(
         )
 
         text = (
-            f"*Switched to {session_id}*\n\n"
-            f"📂 {project_name}\n"
-            f"🌿 {session.branch}\n"
+            f"*Switched to {escape_markdown(session_id)}*\n\n"
+            f"📂 {escape_markdown(project_name)}\n"
+            f"🌿 {escape_markdown(session.branch)}\n"
             f"🔹 State: {session.state.value}\n\n"
             f"_Reply to this message to send instructions._"
         )
@@ -1979,12 +1972,14 @@ async def task_callback_handler(
 
             if not task_list:
                 await query.edit_message_text(
-                    f"No tasks for project `{session.project_id}`.",
+                    f"No tasks for project `{escape_markdown(session.project_id)}`.",
                     parse_mode="Markdown",
                 )
                 return
 
-            text = format_task_list(task_list, f"Tasks for `{session.project_id}`")
+            text = format_task_list(
+                task_list, f"Tasks for `{escape_markdown(session.project_id)}`"
+            )
             keyboard = build_task_keyboard(task_list)
 
             await query.edit_message_text(
@@ -2215,19 +2210,19 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         if not jobs_list:
             await update.message.reply_text(
-                f"No jobs found for session `{session_id}`.",
+                f"No jobs found for session `{escape_markdown(session_id)}`.",
                 parse_mode="Markdown",
             )
             return
 
-        text = f"*Jobs for `{session_id}`*\n\n"
+        text = f"*Jobs for `{escape_markdown(session_id)}`*\n\n"
 
         for job in jobs_list:
             icon = _job_status_icon(JobStatus(job["status"]))
             text += f"{icon} `{job['job_id']}` - {job['status']}\n"
-            text += f"   _{job['instruction']}_\n"
+            text += f"   _{escape_markdown(job['instruction'])}_\n"
             if job.get("error"):
-                text += f"   ❌ {job['error'][:50]}\n"
+                text += f"   ❌ {escape_markdown(job['error'][:50])}\n"
             text += "\n"
 
         text += f"_Total: {len(jobs_list)} job(s)_"
@@ -2511,7 +2506,11 @@ async def approvals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         pending = await approvals.list_pending_approvals(db, session_id)
 
         if not pending:
-            scope = f"session `{session_id}`" if session_id else "any session"
+            scope = (
+                f"session `{escape_markdown(session_id)}`"
+                if session_id
+                else "any session"
+            )
             await update.message.reply_text(
                 f"No pending approvals for {scope}.",
                 parse_mode="Markdown",
@@ -3046,12 +3045,12 @@ async def _run_as_instruction(
     # Verify session exists and is idle
     session = await db.get_session(session_id)
     if not session:
-        await send(f"Session `{session_id}` not found.")
+        await send(f"Session `{escape_markdown(session_id)}` not found.")
         return
 
     if session.state == SessionState.RUNNING:
         await send(
-            f"Session `{session_id}` is already running "
+            f"Session `{escape_markdown(session_id)}` is already running "
             f"job `{session.current_job_id}`.\n"
             "Wait for it to complete or use /cancel."
         )
@@ -3180,13 +3179,14 @@ async def _monitor_job_completion(
                     summary = job.result_summary[:200]
                     if len(job.result_summary) > 200:
                         summary += "..."
-                    summary_text = f"\n\n💬 _{summary}_"
+                    summary_text = f"\n\n💬 _{escape_markdown(summary)}_"
 
                 await bot.send_message(
                     chat_id,
                     f"✅ *Job Completed*\n\n"
                     f"🔹 Job: `{job_id}`\n"
-                    f"📂 Session: `{session_id}`{files_text}{summary_text}\n\n"
+                    f"📂 Session: `{escape_markdown(session_id)}`"
+                    f"{files_text}{summary_text}\n\n"
                     f"Use /summary or /tail to see details.",
                     parse_mode="Markdown",
                 )
@@ -3197,13 +3197,13 @@ async def _monitor_job_completion(
                     error = job.error[:200]
                     if len(job.error) > 200:
                         error += "..."
-                    error_text = f"\n\n❗ _{error}_"
+                    error_text = f"\n\n❗ _{escape_markdown(error)}_"
 
                 await bot.send_message(
                     chat_id,
                     f"❌ *Job Failed*\n\n"
                     f"🔹 Job: `{job_id}`\n"
-                    f"📂 Session: `{session_id}`{error_text}\n\n"
+                    f"📂 Session: `{escape_markdown(session_id)}`{error_text}\n\n"
                     f"Use /tail to see logs.",
                     parse_mode="Markdown",
                 )
@@ -3213,7 +3213,7 @@ async def _monitor_job_completion(
                     chat_id,
                     f"⏹️ *Job Canceled*\n\n"
                     f"🔹 Job: `{job_id}`\n"
-                    f"📂 Session: `{session_id}`",
+                    f"📂 Session: `{escape_markdown(session_id)}`",
                     parse_mode="Markdown",
                 )
 
@@ -4316,14 +4316,14 @@ async def _execute_command(
             session = await db.get_session(session_id)
             if session:
                 await send(
-                    f"**Session {session_id}**\n\n"
-                    f"📂 Project: `{session.project_id}`\n"
-                    f"🌿 Branch: `{session.branch}`\n"
-                    f"📁 {session.workspace_path}",
+                    f"**Session {escape_markdown(session_id)}**\n\n"
+                    f"📂 Project: `{escape_markdown(session.project_id)}`\n"
+                    f"🌿 Branch: `{escape_markdown(session.branch)}`\n"
+                    f"📁 {escape_markdown(session.workspace_path)}",
                     parse_mode="Markdown",
                 )
             else:
-                await send(f"Session {session_id} not found.")
+                await send(f"Session {escape_markdown(session_id)} not found.")
         return True
 
     if base_cmd == "/jobs" and not args:
@@ -4333,9 +4333,9 @@ async def _execute_command(
         else:
             recent_jobs = await db.get_jobs_by_session(session_id, limit=5)
             if not recent_jobs:
-                await send(f"No jobs for session {session_id}.")
+                await send(f"No jobs for session {escape_markdown(session_id)}.")
             else:
-                lines = [f"**Recent Jobs ({session_id}):**\n"]
+                lines = [f"**Recent Jobs ({escape_markdown(session_id)}):**\n"]
                 for j in recent_jobs:
                     status_emoji = {
                         "queued": "⏳",
@@ -4344,7 +4344,7 @@ async def _execute_command(
                         "failed": "❌",
                         "canceled": "⏹️",
                     }.get(j.status.value, "❓")
-                    instr = j.instruction[:30]
+                    instr = escape_markdown(j.instruction[:30])
                     lines.append(f"{status_emoji} `{j.job_id[:8]}` - {instr}")
                 await send("\n".join(lines), parse_mode="Markdown")
         return True
@@ -4378,12 +4378,13 @@ async def _execute_command(
         session_id = args.strip().upper()
         result = await sessions.get_session(db, session_id)
         if not result:
-            await send(f"Session {session_id} not found.")
+            await send(f"Session {escape_markdown(session_id)} not found.")
             return True
         chat_state.set_active_session(chat_id, session_id)
         await send(
-            f"✅ Switched to session {session_id}\n\n"
-            f"📂 {result['project_id']} 🌿 {result['branch']}"
+            f"✅ Switched to session {escape_markdown(session_id)}\n\n"
+            f"📂 {escape_markdown(result['project_id'])} "
+            f"🌿 {escape_markdown(result['branch'])}"
         )
         return True
 
@@ -4397,9 +4398,10 @@ async def _execute_command(
             return True
         chat_state.set_active_session(chat_id, result["session_id"])
         await send(
-            f"✅ Session created: {result['session_id']}\n\n"
-            f"📂 {result['project_id']} 🌿 {result['branch']}\n"
-            f"📁 {result['workspace_path']}"
+            f"✅ Session created: {escape_markdown(result['session_id'])}\n\n"
+            f"📂 {escape_markdown(result['project_id'])} "
+            f"🌿 {escape_markdown(result['branch'])}\n"
+            f"📁 {escape_markdown(result['workspace_path'])}"
         )
         return True
 
@@ -4418,7 +4420,7 @@ async def _execute_command(
             return True
         if chat_state.get_active_session(chat_id) == session_id:
             chat_state.set_active_session(chat_id, None)
-        await send(f"✅ Session {session_id} closed.")
+        await send(f"✅ Session {escape_markdown(session_id)} closed.")
         return True
 
     if base_cmd == "/cancel":
@@ -4427,7 +4429,7 @@ async def _execute_command(
             await send("No active session.")
             return True
         # Cancel logic would go here
-        await send(f"🛑 Cancelling job for session {session_id}...")
+        await send(f"🛑 Cancelling job for session {escape_markdown(session_id)}...")
         return True
 
     if base_cmd == "/run" and args:
@@ -4449,7 +4451,10 @@ async def _execute_command(
         except ValueError as e:
             await send(f"Error: {e}")
             return True
-        await send(f"✅ Task {task_id} claimed by session {session_id}")
+        await send(
+            f"✅ Task {escape_markdown(task_id)} claimed by "
+            f"session {escape_markdown(session_id)}"
+        )
         return True
 
     if base_cmd == "/sync":
