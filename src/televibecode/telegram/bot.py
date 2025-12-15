@@ -58,6 +58,8 @@ from televibecode.telegram.handlers import (
     tasks_command,
     tracker_callback_handler,
     tracker_command,
+    unstick_callback_handler,
+    unstick_command,
     use_session_command,
     voice_confirm_callback_handler,
     voice_message_handler,
@@ -233,6 +235,7 @@ class TeleVibeBot:
             CommandHandler("cleanup", cleanup_sessions_command, filters=auth)
         )
         self.app.add_handler(CommandHandler("status", status_command, filters=auth))
+        self.app.add_handler(CommandHandler("unstick", unstick_command, filters=auth))
 
         # Reply-to message handler (for session routing)
         self.app.add_handler(
@@ -347,6 +350,13 @@ class TeleVibeBot:
             CallbackQueryHandler(
                 self._auth_callback_wrapper(tracker_callback_handler),
                 pattern="^trk:",
+            )
+        )
+        # Unstick session callback handler
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(unstick_callback_handler),
+                pattern="^unstick:",
             )
         )
 

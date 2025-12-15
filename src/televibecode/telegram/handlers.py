@@ -62,6 +62,7 @@ from televibecode.telegram.formatters import (
     escape_markdown,
     format_project_list,
     format_session_list,
+    safe_code,
     safe_inline,
 )
 from televibecode.telegram.state import ChatStateManager
@@ -104,6 +105,8 @@ __all__ = [
     "newproject_command",
     "newproject_callback_handler",
     "reset_command",
+    "unstick_command",
+    "unstick_callback_handler",
     "agent_callback_handler",
     "close_callback_handler",
     "choice_callback_handler",
@@ -359,6 +362,79 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(
             "Failed to clear conversation history. Please try again."
         )
+
+
+async def unstick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /unstick command - reset session state to IDLE.
+
+    Use this when a session is stuck in RUNNING state with no actual job.
+    Usage: /unstick [session_id]
+    """
+    db = get_db(context)
+    chat_state = get_chat_state(context)
+    chat_id = update.effective_chat.id
+    args = context.args or []
+
+    # Get session ID
+    session_id = args[0] if args else chat_state.get_active_session(chat_id)
+
+    if not session_id:
+        await update.message.reply_text(
+            "No session specified and no active session.\n\n"
+            "Usage: `/unstick [session_id]`",
+            parse_mode="Markdown",
+        )
+        return
+
+    session = await db.get_session(session_id)
+    if not session:
+        await update.message.reply_text(
+            f"Session `{escape_markdown(session_id)}` not found.",
+            parse_mode="Markdown",
+        )
+        return
+
+    if session.state == SessionState.IDLE:
+        await update.message.reply_text(
+            f"Session `{escape_markdown(session_id)}` is already idle.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Check if there's actually a running job
+    if session.current_job_id:
+        job = await db.get_job(session.current_job_id)
+        if job and job.status == JobStatus.RUNNING:
+            await update.message.reply_text(
+                f"Session `{escape_markdown(session_id)}` has a running job "
+                f"(`{job.job_id}`).\n\n"
+                "Use `/cancel` to stop it first, or force unstick with "
+                "`/unstick {session_id} --force`.",
+                parse_mode="Markdown",
+            )
+            return
+
+    # Check for --force flag
+    force = "--force" in args or "-f" in args
+
+    # Reset the session state
+    old_state = session.state.value
+    session.state = SessionState.IDLE
+    session.current_job_id = None
+    await db.update_session(session)
+
+    log.info(
+        "session_unstuck",
+        session_id=session_id,
+        old_state=old_state,
+        forced=force,
+    )
+
+    await update.message.reply_text(
+        f"✅ Session `{escape_markdown(session_id)}` unstuck.\n\n"
+        f"State reset from `{old_state}` → `idle`.",
+        parse_mode="Markdown",
+    )
 
 
 async def projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2172,13 +2248,81 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except ValueError as e:
         # Add error reaction
         await add_reaction(context, chat_id, message_id, "❌")
-        await update.message.reply_text(
-            f"*Job Failed to Start*\n\nError: {e}",
-            parse_mode="Markdown",
-        )
+
+        error_msg = str(e)
+
+        # Check if it's a stuck session error
+        if "already has a running job" in error_msg.lower():
+            # Offer an unstick button
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔧 Unstick Session",
+                        callback_data=f"unstick:{session_id}",
+                    ),
+                ]
+            ])
+            await update.message.reply_text(
+                f"*Job Failed to Start*\n\n"
+                f"Error: {safe_inline(error_msg)}\n\n"
+                f"_The session may be stuck. Click below to reset it._",
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+        else:
+            await update.message.reply_text(
+                f"*Job Failed to Start*\n\nError: {safe_inline(error_msg)}",
+                parse_mode="Markdown",
+            )
+
         # Clean up pending tracker if it was created
         if tracker_manager:
             tracker_manager.remove_tracker("pending")
+
+
+async def unstick_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle callback queries for unstick buttons.
+
+    Callback data format: unstick:<session_id>
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("unstick:"):
+        return
+
+    session_id = data.split(":")[1]
+    db = get_db(context)
+
+    session = await db.get_session(session_id)
+    if not session:
+        await query.edit_message_text(
+            f"Session `{escape_markdown(session_id)}` not found.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Reset the session state
+    old_state = session.state.value
+    session.state = SessionState.IDLE
+    session.current_job_id = None
+    await db.update_session(session)
+
+    log.info(
+        "session_unstuck_via_button",
+        session_id=session_id,
+        old_state=old_state,
+    )
+
+    await query.edit_message_text(
+        f"✅ Session `{escape_markdown(session_id)}` unstuck.\n\n"
+        f"State reset from `{old_state}` → `idle`.\n\n"
+        f"_You can now run instructions again._",
+        parse_mode="Markdown",
+    )
 
 
 async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4576,7 +4720,9 @@ async def command_callback_handler(
 
     # Show processing
     with contextlib.suppress(BadRequest):
-        await query.edit_message_text(f"Executing: `{command}`", parse_mode="Markdown")
+        await query.edit_message_text(
+            f"Executing: `{safe_code(command)}`", parse_mode="Markdown"
+        )
 
     # Execute the command
     executed = await _execute_command(command, update, context)
