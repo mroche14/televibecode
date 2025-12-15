@@ -1,4 +1,24 @@
-"""Message formatters for Telegram output."""
+"""Message formatters for Telegram output.
+
+This module provides safe markdown formatting utilities for Telegram messages.
+
+IMPORTANT: Always use these helpers for user-provided content to prevent
+markdown parsing errors:
+
+- `escape_markdown(text)` - Escapes special chars (_*[]`)
+- `safe_inline(text)` - For text inside _italics_ or *bold* (also strips newlines)
+- `safe_code(text)` - For text inside `backticks` (escapes backticks)
+
+Example:
+    # For regular text with potential special chars:
+    f"Project: {escape_markdown(project_name)}"
+
+    # For italic/bold content (will be wrapped in _..._ or *...*):
+    f"_{safe_inline(description)}_"
+
+    # For inline code:
+    f"`{safe_code(session_id)}`"
+"""
 
 from datetime import datetime, timezone
 
@@ -8,17 +28,98 @@ from televibecode.db.models import Session, SessionState
 def escape_markdown(text: str) -> str:
     """Escape Telegram markdown special characters.
 
+    Use this for any user-provided text that will be displayed in a message
+    with parse_mode="Markdown". This prevents characters like _ or * from
+    being interpreted as formatting.
+
     Args:
-        text: Text to escape.
+        text: Text to escape. Can be None or empty.
 
     Returns:
-        Escaped text safe for Telegram markdown.
+        Escaped text safe for Telegram markdown. Returns empty string for None.
+
+    Example:
+        f"Branch: {escape_markdown(branch_name)}"
+        f"Session `{escape_markdown(session_id)}` created"
     """
     if not text:
-        return text
+        return text or ""
     # Escape markdown special characters
     for char in ["_", "*", "[", "]", "`"]:
         text = text.replace(char, "\\" + char)
+    return text
+
+
+def safe_inline(text: str, max_len: int | None = None) -> str:
+    """Prepare text for use inside inline formatting (_italic_ or *bold*).
+
+    This function:
+    1. Replaces newlines with spaces (newlines break inline formatting)
+    2. Optionally truncates to max_len
+    3. Escapes markdown special characters
+
+    IMPORTANT: Use this whenever text will be wrapped in underscores or asterisks:
+        f"_{safe_inline(description)}_"
+        f"*{safe_inline(title)}*"
+
+    Args:
+        text: Text to prepare. Can be None or empty.
+        max_len: Optional maximum length (truncates with "..." if exceeded).
+
+    Returns:
+        Text safe for inline markdown formatting.
+
+    Example:
+        # For italic description:
+        f"_{safe_inline(job.instruction, max_len=100)}_"
+
+        # For bold title:
+        f"*{safe_inline(task.title)}*"
+    """
+    if not text:
+        return text or ""
+
+    # Replace newlines with spaces (critical for inline formatting)
+    text = text.replace("\n", " ").replace("\r", " ")
+
+    # Collapse multiple spaces
+    while "  " in text:
+        text = text.replace("  ", " ")
+
+    # Truncate if needed
+    if max_len and len(text) > max_len:
+        text = text[: max_len - 3].rstrip() + "..."
+
+    # Escape markdown characters
+    return escape_markdown(text)
+
+
+def safe_code(text: str, max_len: int | None = None) -> str:
+    """Prepare text for use inside backticks (`code`).
+
+    This function escapes backticks and optionally truncates.
+    Newlines are preserved in code blocks.
+
+    Args:
+        text: Text to prepare. Can be None or empty.
+        max_len: Optional maximum length.
+
+    Returns:
+        Text safe for inline code formatting.
+
+    Example:
+        f"Session: `{safe_code(session_id)}`"
+    """
+    if not text:
+        return text or ""
+
+    # Escape backticks
+    text = text.replace("`", "\\`")
+
+    # Truncate if needed
+    if max_len and len(text) > max_len:
+        text = text[: max_len - 3] + "..."
+
     return text
 
 

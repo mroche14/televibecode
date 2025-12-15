@@ -62,6 +62,7 @@ from televibecode.telegram.formatters import (
     escape_markdown,
     format_project_list,
     format_session_list,
+    safe_inline,
 )
 from televibecode.telegram.state import ChatStateManager
 
@@ -1706,12 +1707,9 @@ async def next_tasks_command(
         for i, task in enumerate(task_list, 1):
             priority_icon = _task_priority_icon(TaskPriority(task["priority"]))
             text += f"{i}. {priority_icon} `{task['task_id']}`\n"
-            text += f"   *{escape_markdown(task['title'])}*\n"
+            text += f"   *{safe_inline(task['title'])}*\n"
             if task.get("description"):
-                desc = task["description"][:100].replace('\n', ' ')
-                if len(task["description"]) > 100:
-                    desc += "..."
-                text += f"   _{escape_markdown(desc)}_\n"
+                text += f"   _{safe_inline(task['description'], max_len=100)}_\n"
             text += "\n"
 
         keyboard = build_task_keyboard(task_list)
@@ -1869,8 +1867,7 @@ async def task_callback_handler(
             text += f"🌿 Branch: {escape_markdown(task_detail['branch'])}\n"
 
         if task_detail.get("description"):
-            desc = task_detail['description'][:300].replace('\n', ' ')
-            text += f"\n_{escape_markdown(desc)}_"
+            text += f"\n_{safe_inline(task_detail['description'], max_len=300)}_"
 
         # Build action buttons
         buttons = []
@@ -2223,12 +2220,9 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for job in jobs_list:
             icon = _job_status_icon(JobStatus(job["status"]))
             text += f"{icon} `{job['job_id']}` - {job['status']}\n"
-            # Replace newlines to prevent breaking underscore italic formatting
-            instr = job['instruction'].replace('\n', ' ')[:100]
-            text += f"   _{escape_markdown(instr)}_\n"
+            text += f"   _{safe_inline(job['instruction'], max_len=100)}_\n"
             if job.get("error"):
-                err = job['error'].replace('\n', ' ')[:50]
-                text += f"   ❌ {escape_markdown(err)}\n"
+                text += f"   ❌ {safe_inline(job['error'], max_len=50)}\n"
             text += "\n"
 
         text += f"_Total: {len(jobs_list)} job(s)_"
@@ -2532,10 +2526,7 @@ async def approvals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             text += (
                 f"   📂 `{escape_markdown(a['session_id'])}` / `{a['job_id']}`\n"
             )
-            desc = a["action_description"][:60].replace('\n', ' ')
-            if len(a["action_description"]) > 60:
-                desc += "..."
-            text += f"   _{escape_markdown(desc)}_\n\n"
+            text += f"   _{safe_inline(a['action_description'], max_len=60)}_\n\n"
 
         text += f"_Total: {len(pending)} pending approval(s)_"
 
@@ -2669,25 +2660,19 @@ async def approval_callback_handler(
             text += f"🔹 Job: `{detail['job_id']}`\n"
             text += f"📊 State: {detail['state']}\n\n"
 
-            action_desc = escape_markdown(
-                detail['action_description'].replace('\n', ' ')
-            )
-            text += f"*Action*:\n_{action_desc}_\n\n"
+            text += f"*Action*:\n_{safe_inline(detail['action_description'])}_\n\n"
 
             details = detail.get("action_details")
             if details:
                 text += "*Details*:\n"
                 if isinstance(details, dict):
                     for k, v in details.items():
-                        val = str(v)[:50].replace('\n', ' ')
-                        text += f"  • {k}: `{escape_markdown(val)}`\n"
+                        text += f"  • {k}: `{safe_inline(str(v), max_len=50)}`\n"
                 text += "\n"
 
             job = detail.get("job")
             if job and job.get("instruction"):
-                instr = escape_markdown(
-                    job['instruction'][:150].replace('\n', ' ')
-                )
+                instr = safe_inline(job['instruction'], max_len=150)
                 text += f"*Job Instruction*:\n_{instr}_\n"
 
             # Show action buttons if still pending
@@ -3191,10 +3176,8 @@ async def _monitor_job_completion(
 
                 summary_text = ""
                 if job.result_summary:
-                    summary = job.result_summary[:200].replace('\n', ' ')
-                    if len(job.result_summary) > 200:
-                        summary += "..."
-                    summary_text = f"\n\n💬 _{escape_markdown(summary)}_"
+                    summary = safe_inline(job.result_summary, max_len=200)
+                    summary_text = f"\n\n💬 _{summary}_"
 
                 await bot.send_message(
                     chat_id,
@@ -3209,10 +3192,7 @@ async def _monitor_job_completion(
             elif job.status == JobStatus.FAILED:
                 error_text = ""
                 if job.error:
-                    error = job.error[:200].replace('\n', ' ')
-                    if len(job.error) > 200:
-                        error += "..."
-                    error_text = f"\n\n❗ _{escape_markdown(error)}_"
+                    error_text = f"\n\n❗ _{safe_inline(job.error, max_len=200)}_"
 
                 await bot.send_message(
                     chat_id,
@@ -4240,9 +4220,8 @@ async def voice_message_handler(
         context.bot_data["voice_transcriptions"][chat_id] = transcribed_text
 
         # Escape for markdown display (but keep original for processing)
-        display_text = escape_markdown(transcribed_text.replace('\n', ' '))
         await update.message.reply_text(
-            f"🎤 *Transcribed:*\n_{display_text}_\n\n"
+            f"🎤 *Transcribed:*\n_{safe_inline(transcribed_text)}_\n\n"
             "Confirm to process this message:",
             parse_mode="Markdown",
             reply_markup=keyboard,
@@ -4649,10 +4628,9 @@ async def voice_confirm_callback_handler(
             return
 
         # Update message to show processing
-        display_text = escape_markdown(transcribed_text.replace('\n', ' '))
         with contextlib.suppress(BadRequest):
             await query.edit_message_text(
-                f"🎤 Processing: _{display_text}_",
+                f"🎤 Processing: _{safe_inline(transcribed_text)}_",
                 parse_mode="Markdown",
             )
 
@@ -4736,8 +4714,7 @@ async def _process_with_suggestions(
         # For single high-confidence suggestion, make it prominent
         if len(result.suggestions) == 1 and top.confidence >= 0.8:
             keyboard = _build_suggestion_keyboard(result.suggestions)
-            desc = escape_markdown(top.description.replace('\n', ' '))
-            msg = f"Did you mean:\n\n`{top.command}`\n_{desc}_"
+            msg = f"Did you mean:\n\n`{top.command}`\n_{safe_inline(top.description)}_"
         else:
             # Multiple suggestions
             keyboard = _build_suggestion_keyboard(result.suggestions)
