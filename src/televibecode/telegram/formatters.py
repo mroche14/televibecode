@@ -5,6 +5,23 @@ from datetime import datetime, timezone
 from televibecode.db.models import Session, SessionState
 
 
+def escape_markdown(text: str) -> str:
+    """Escape Telegram markdown special characters.
+
+    Args:
+        text: Text to escape.
+
+    Returns:
+        Escaped text safe for Telegram markdown.
+    """
+    if not text:
+        return text
+    # Escape markdown special characters
+    for char in ["_", "*", "[", "]", "`"]:
+        text = text.replace(char, "\\" + char)
+    return text
+
+
 def format_project_list(projects: list[dict]) -> str:
     """Format project list for display.
 
@@ -43,8 +60,11 @@ def format_session_list(sessions: list[Session], title: str = "Sessions") -> str
 
     for s in sessions:
         state_icon = _session_state_icon(s.state)
-        text += f"{state_icon} `{s.session_id}` ({s.project_id})\n"
-        text += f"   🌿 {s.branch}\n"
+        # Escape branch and project_id to avoid markdown issues
+        branch_escaped = escape_markdown(s.branch)
+        project_escaped = escape_markdown(s.project_id)
+        text += f"{state_icon} `{s.session_id}` ({project_escaped})\n"
+        text += f"   🌿 {branch_escaped}\n"
         text += f"   ⏱️ {_relative_time(s.last_activity_at)}\n"
 
         if s.last_summary:
@@ -52,7 +72,7 @@ def format_session_list(sessions: list[Session], title: str = "Sessions") -> str
                 summary = s.last_summary[:50] + "..."
             else:
                 summary = s.last_summary
-            text += f"   📝 {summary}\n"
+            text += f"   📝 {escape_markdown(summary)}\n"
 
         text += "\n"
 
@@ -71,18 +91,22 @@ def format_session_card(session: Session, project_name: str) -> str:
         Formatted markdown string.
     """
     state_icon = _session_state_icon(session.state)
+    branch_escaped = escape_markdown(session.branch)
+    project_escaped = escape_markdown(project_name)
 
-    text = f"📂 [{project_name}] 🔹 [{session.session_id}] 🌿 {session.branch}\n\n"
+    text = f"📂 {project_escaped} 🔹 {session.session_id} 🌿 {branch_escaped}\n\n"
     text += f"*State*: {state_icon} {session.state.value}\n"
     text += f"*Last Activity*: {_relative_time(session.last_activity_at)}\n"
 
     if session.last_summary:
-        text += f"\n*Last Summary*:\n{session.last_summary[:200]}"
+        summary = escape_markdown(session.last_summary[:200])
+        text += f"\n*Last Summary*:\n{summary}"
         if len(session.last_summary) > 200:
             text += "..."
 
     if session.attached_task_ids:
-        text += f"\n\n*Attached Tasks*: {', '.join(session.attached_task_ids)}"
+        tasks = ", ".join(session.attached_task_ids)
+        text += f"\n\n*Attached Tasks*: {escape_markdown(tasks)}"
 
     return text
 
@@ -110,8 +134,15 @@ def format_job_status(
     """
     icon = _job_status_icon(status)
     truncated = instruction[:80] + "..." if len(instruction) > 80 else instruction
+    # Escape all user-provided content
+    branch_escaped = escape_markdown(branch)
+    project_escaped = escape_markdown(project_id)
+    instruction_escaped = escape_markdown(truncated)
 
-    return f"{icon} {session_id} ({project_id}/{branch}): {truncated}"
+    return (
+        f"{icon} {session_id} ({project_escaped}/{branch_escaped}): "
+        f"{instruction_escaped}"
+    )
 
 
 def _session_state_icon(state: SessionState) -> str:

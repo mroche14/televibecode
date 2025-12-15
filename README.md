@@ -71,6 +71,72 @@ TeleVibeCode runs as a server on your dev machine (or a VPS). It:
 - Streams progress back to Telegram
 - Gates dangerous operations behind approval buttons
 
+## Core Concepts
+
+Understanding the relationship between **Projects**, **Sessions**, **Branches**, and **Jobs** is essential:
+
+```
+PROJECT (Git Repository)
+    │
+    │  You have multiple projects in ~/projects/
+    │  Each is a git repo TeleVibeCode can work with
+    │
+    └──► SESSION (Isolated Workspace)
+            │
+            │  Each session = 1 git worktree + 1 branch
+            │  Sessions are isolated - changes don't affect each other
+            │  Max 10 sessions per project
+            │
+            └──► JOB (Claude Code Execution)
+                    │
+                    │  Each job = 1 instruction sent to Claude
+                    │  Jobs run sequentially within a session
+                    │  Claude works in the session's worktree
+```
+
+### Why Git Worktrees?
+
+Sessions use **git worktrees** for true isolation:
+
+```
+Main repo (untouched):        Session worktrees (isolated):
+~/projects/my-app/            ~/.televibe/workspaces/
+    │                              ├── my-app_20241214_153042/
+    │                              │   └── branch: televibe/...153042
+    └── .git/                      │   └── Claude works HERE
+        └── worktrees/             │
+                                   └── my-app_20241214_160000/
+                                       └── branch: televibe/...160000
+                                       └── Another Claude works HERE
+```
+
+- **Parallel work**: Run multiple sessions on the same project simultaneously
+- **No conflicts**: Each session has its own branch and working directory
+- **Safe experimentation**: Close a session to discard changes, or push to keep them
+
+### Session Lifecycle
+
+```
+/new my-app          Create session → worktree + branch created
+       ↓
+/run "add feature"   Run jobs → Claude works in worktree
+       ↓
+/status              Check progress → see commits, drift from main
+       ↓
+/push                Push branch → backup to origin
+       ↓
+/close               Close session → choose to delete/keep branch
+```
+
+### Important: Sessions Are Only Created On Demand
+
+**Sessions are NOT created automatically.** You must explicitly:
+- Use `/new <project>` command, or
+- Use `/newproject` to create a new project (includes initial session), or
+- Confirm a session creation suggestion from the AI (Yes/No buttons)
+
+Asking questions like "list my projects" or "what's the status?" will **never** create a session or branch.
+
 ## Quick Start
 
 ### 1. Get a Telegram Bot Token
@@ -146,7 +212,9 @@ TeleVibeCode creates a `.televibe/` folder in your projects root. Your repositor
 | `/sessions` | List all active sessions |
 | `/new <project> [branch]` | Create session with optional branch |
 | `/use <session>` | Set session as active (for subsequent commands) |
-| `/close [session]` | Close a session |
+| `/close [session]` | Close a session (with branch options) |
+| `/push [session]` | Push session branch to origin |
+| `/cleanup` | Close all sessions |
 
 ### Running Instructions
 | Command | Description |

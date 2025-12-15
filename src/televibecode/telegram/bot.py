@@ -1,6 +1,8 @@
 """Telegram bot setup and initialization."""
 
 import asyncio
+import json
+from pathlib import Path
 
 import structlog
 from telegram import BotCommand, Update
@@ -17,12 +19,15 @@ from telegram.ext.filters import BaseFilter
 from televibecode.config import Settings
 from televibecode.db import Database
 from televibecode.telegram.handlers import (
+    agent_callback_handler,
     approval_callback_handler,
     approvals_command,
     cancel_command,
+    choice_callback_handler,
     claim_task_command,
     cleanup_callback_handler,
     cleanup_sessions_command,
+    close_callback_handler,
     close_session_command,
     command_callback_handler,
     handle_reply_message,
@@ -37,7 +42,9 @@ from televibecode.telegram.handlers import (
     newproject_command,
     next_tasks_command,
     projects_command,
+    push_command,
     reset_command,
+    restart_command,
     run_command,
     scan_command,
     session_callback_handler,
@@ -49,12 +56,14 @@ from televibecode.telegram.handlers import (
     tail_command,
     task_callback_handler,
     tasks_command,
+    tracker_callback_handler,
+    tracker_command,
     use_session_command,
     voice_confirm_callback_handler,
     voice_message_handler,
-    agent_callback_handler,
 )
 from televibecode.telegram.state import ChatStateManager
+from televibecode.tracker import JobTrackerManager, TrackerConfig
 
 log = structlog.get_logger()
 
@@ -113,6 +122,7 @@ class TeleVibeBot:
         self.state = ChatStateManager(db=db)  # Enable preference persistence
         self.app: Application | None = None
         self.auth_filter = AllowedChatFilter(settings.telegram_allowed_chat_ids)
+        self.tracker_manager: JobTrackerManager | None = None
 
     async def setup(self) -> Application:
         """Set up the bot application.
@@ -136,11 +146,18 @@ class TeleVibeBot:
         # Build application
         self.app = Application.builder().token(self.settings.telegram_bot_token).build()
 
+        # Initialize job tracker manager
+        self.tracker_manager = JobTrackerManager(
+            bot=self.app.bot,
+            default_config=TrackerConfig(),
+        )
+
         # Store references in bot_data for handlers
         self.app.bot_data["db"] = self.db
         self.app.bot_data["settings"] = self.settings
         self.app.bot_data["chat_state"] = self.state
         self.app.bot_data["auth_filter"] = self.auth_filter
+        self.app.bot_data["tracker_manager"] = self.tracker_manager
 
         # Register handlers
         self._register_handlers()
@@ -162,6 +179,7 @@ class TeleVibeBot:
             BotCommand("new", "Create a new session"),
             BotCommand("use", "Switch to a session"),
             BotCommand("close", "Close a session"),
+            BotCommand("push", "Push session branch to origin"),
             BotCommand("cleanup", "Close all sessions"),
             BotCommand("status", "Show session status"),
             BotCommand("tasks", "List tasks"),
@@ -176,6 +194,7 @@ class TeleVibeBot:
             BotCommand("approvals", "List pending approvals"),
             BotCommand("models", "List available AI models"),
             BotCommand("model", "Switch AI model"),
+            BotCommand("tracker", "Configure job tracker display"),
             BotCommand("reset", "Clear AI conversation history"),
         ]
         await self.app.bot.set_my_commands(commands)
@@ -185,6 +204,10 @@ class TeleVibeBot:
         """Register command and message handlers."""
         # Auth filter for all handlers
         auth = self.auth_filter
+
+        # PRIVILEGED COMMANDS - These are handled FIRST and never seen by AI
+        # /restart is a human-only command for safety
+        self.app.add_handler(CommandHandler("restart", restart_command, filters=auth))
 
         # Basic commands
         self.app.add_handler(CommandHandler("start", start_command, filters=auth))
@@ -205,6 +228,7 @@ class TeleVibeBot:
         self.app.add_handler(
             CommandHandler("close", close_session_command, filters=auth)
         )
+        self.app.add_handler(CommandHandler("push", push_command, filters=auth))
         self.app.add_handler(
             CommandHandler("cleanup", cleanup_sessions_command, filters=auth)
         )
@@ -239,6 +263,9 @@ class TeleVibeBot:
         # Model commands
         self.app.add_handler(CommandHandler("models", models_command, filters=auth))
         self.app.add_handler(CommandHandler("model", model_command, filters=auth))
+
+        # Tracker config command
+        self.app.add_handler(CommandHandler("tracker", tracker_command, filters=auth))
 
         # Callback query handlers (for inline keyboards)
         # Note: CallbackQueryHandler checks auth in the handler itself
@@ -299,6 +326,27 @@ class TeleVibeBot:
             CallbackQueryHandler(
                 self._auth_callback_wrapper(cleanup_callback_handler),
                 pattern="^cleanup:",
+            )
+        )
+        # Close session branch options handler
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(close_callback_handler),
+                pattern="^close:",
+            )
+        )
+        # Agent MCQ choice handler (user selects from multiple options)
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(choice_callback_handler),
+                pattern="^choice:",
+            )
+        )
+        # Tracker config callback handler
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._auth_callback_wrapper(tracker_callback_handler),
+                pattern="^trk:",
             )
         )
 
@@ -410,6 +458,63 @@ class TeleVibeBot:
                 "An error occurred. Please try again."
             )
 
+    async def handle_post_restart(self) -> None:
+        """Handle notifications after a restart.
+
+        If there's a restart_state.json file, read it and notify
+        the users who triggered the restart that we're back online.
+        """
+        state_file = Path.home() / ".televibe" / "restart_state.json"
+
+        if not state_file.exists():
+            return
+
+        try:
+            state = json.loads(state_file.read_text())
+            log.info("post_restart_state_found", state=state)
+
+            # Get current commit for the message
+            try:
+                import subprocess
+
+                result = subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    cwd=Path(__file__).parent.parent.parent,
+                )
+                current_commit = (
+                    result.stdout.strip() if result.returncode == 0 else "unknown"
+                )
+            except Exception:
+                current_commit = "unknown"
+
+            # Notify each chat with a new message
+            for chat_id in state.get("notify_chats", []):
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"✅ *TeleVibeCode is back online!*\n\n"
+                        f"Commit: `{current_commit}`",
+                        parse_mode="Markdown",
+                    )
+                    log.info("post_restart_notification_sent", chat_id=chat_id)
+                except Exception as e:
+                    log.warning(
+                        "post_restart_notification_failed",
+                        chat_id=chat_id,
+                        error=str(e),
+                    )
+
+            # Clear the state file (may already be deleted by supervisor)
+            state_file.unlink(missing_ok=True)
+            log.info("restart_state_cleared")
+
+        except Exception as e:
+            log.error("post_restart_handling_failed", error=str(e))
+            # Don't let this crash startup - just log and continue
+            state_file.unlink(missing_ok=True)
+
     async def run_polling(self) -> None:
         """Run the bot with polling (for development)."""
         if not self.app:
@@ -421,6 +526,15 @@ class TeleVibeBot:
         await self.app.initialize()
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
+
+        # Write health flag for supervisor
+        health_file = Path.home() / ".televibe" / "health.flag"
+        health_file.parent.mkdir(parents=True, exist_ok=True)
+        health_file.write_text("ok")
+        log.info("health_flag_written")
+
+        # Handle post-restart notifications
+        await self.handle_post_restart()
 
         log.info("telegram_bot_running")
 

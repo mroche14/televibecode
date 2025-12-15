@@ -14,6 +14,8 @@ import structlog
 
 from televibecode.config import Settings
 from televibecode.db import Database, Job, JobStatus, Session, SessionState
+from televibecode.runner.context import get_enhanced_instruction
+from televibecode.tracker import SessionEvent, parse_stream_events
 
 log = structlog.get_logger()
 
@@ -73,6 +75,7 @@ class JobExecutor:
         settings: Settings,
         db: Database,
         on_progress: Callable[[str, JobProgress], None] | None = None,
+        on_event: Callable[[str, SessionEvent], None] | None = None,
     ):
         """Initialize the executor.
 
@@ -80,10 +83,12 @@ class JobExecutor:
             settings: Application settings.
             db: Database instance.
             on_progress: Optional callback for progress updates.
+            on_event: Optional callback for session events (for tracker).
         """
         self.settings = settings
         self.db = db
         self.on_progress = on_progress
+        self.on_event = on_event
         self._running_jobs: dict[str, asyncio.subprocess.Process] = {}
         self._job_progress: dict[str, JobProgress] = {}
 
@@ -223,34 +228,44 @@ class JobExecutor:
                     now = datetime.now(timezone.utc)
                     progress.elapsed_seconds = int((now - start_time).total_seconds())
 
-                    # Try to parse JSON events
+                    # Parse and emit tracker events
+                    if self.on_event:
+                        for session_event in parse_stream_events(line, job.job_id):
+                            self.on_event(job.job_id, session_event)
+
+                    # Try to parse JSON events for progress tracking
                     try:
                         event = json.loads(line)
                         event_type = event.get("type")
 
                         if event_type == "assistant":
-                            content = event.get("content", "")
-                            if content:
-                                summary_lines.append(content[:200])
-                                progress.message_count += 1
-                                progress.last_message = content[:100]
+                            message = event.get("message", {})
+                            content_list = message.get("content", [])
+                            for content in content_list:
+                                if content.get("type") == "text":
+                                    text = content.get("text", "")
+                                    if text:
+                                        summary_lines.append(text[:200])
+                                        progress.message_count += 1
+                                        progress.last_message = text[:100]
+                                elif content.get("type") == "tool_use":
+                                    tool_name = content.get("name", "")
+                                    progress.tool_count += 1
+                                    progress.current_tool = tool_name
 
-                        elif event_type == "tool_use":
-                            tool_name = event.get("name", "")
-                            progress.tool_count += 1
-                            progress.current_tool = tool_name
+                                    if tool_name in ("Write", "Edit", "MultiEdit"):
+                                        tool_input = content.get("input", {})
+                                        file_path = tool_input.get("file_path")
+                                        if file_path and file_path not in files_changed:
+                                            files_changed.append(file_path)
+                                        if (
+                                            file_path
+                                            and file_path not in progress.files_touched
+                                        ):
+                                            progress.files_touched.append(file_path)
 
-                            if tool_name in ("Write", "Edit", "MultiEdit"):
-                                file_path = event.get("input", {}).get("file_path")
-                                if file_path and file_path not in files_changed:
-                                    files_changed.append(file_path)
-                                if (
-                                    file_path
-                                    and file_path not in progress.files_touched
-                                ):
-                                    progress.files_touched.append(file_path)
-
-                        elif event_type == "tool_result":
+                        elif event_type == "user":
+                            # Tool results
                             progress.current_tool = None
 
                         # Report progress periodically (every 3 seconds)
@@ -399,6 +414,8 @@ async def run_instruction(
     session_id: str,
     instruction: str,
     on_progress: Callable[[str, JobProgress], None] | None = None,
+    on_event: Callable[[str, SessionEvent], None] | None = None,
+    on_complete: Callable[[Job], None] | None = None,
 ) -> Job:
     """Run an instruction in a session.
 
@@ -408,6 +425,8 @@ async def run_instruction(
         session_id: Session to run in.
         instruction: Instruction for Claude Code.
         on_progress: Optional progress callback (receives job_id, JobProgress).
+        on_event: Optional event callback for tracker (receives job_id, SessionEvent).
+        on_complete: Optional callback when job completes (receives Job).
 
     Returns:
         Job object.
@@ -421,11 +440,25 @@ async def run_instruction(
             f"Session {session_id} already has a running job: {session.current_job_id}"
         )
 
-    executor = JobExecutor(settings, db, on_progress)
-    job = await executor.run_job(session, instruction)
+    # Get project for context enhancement
+    project = await db.get_project(session.project_id)
+    if not project:
+        raise ValueError(f"Project '{session.project_id}' not found")
 
-    # Execute in background
-    asyncio.create_task(executor.execute_job(job))
+    # Enhance instruction with session context
+    enhanced_instruction = get_enhanced_instruction(instruction, session, project)
+
+    executor = JobExecutor(settings, db, on_progress, on_event)
+    # Store original instruction in raw_input, use enhanced for execution
+    job = await executor.run_job(session, enhanced_instruction, raw_input=instruction)
+
+    # Execute in background with completion callback
+    async def execute_with_callback():
+        completed_job = await executor.execute_job(job)
+        if on_complete:
+            on_complete(completed_job)
+
+    asyncio.create_task(execute_with_callback())
 
     return job
 

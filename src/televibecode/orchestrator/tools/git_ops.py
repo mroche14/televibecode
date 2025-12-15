@@ -264,6 +264,85 @@ class GitOperations:
             "behind": behind,
         }
 
+    def get_branch_drift(
+        self, branch: str, base_branch: str | None = None, worktree_path: str | Path | None = None
+    ) -> dict:
+        """Get how far a branch has drifted from base branch.
+
+        Args:
+            branch: Branch to check.
+            base_branch: Base branch to compare against (defaults to main/master).
+            worktree_path: Path to worktree (uses main repo if None).
+
+        Returns:
+            Dictionary with drift info.
+        """
+        repo = Repo(worktree_path) if worktree_path else self.repo
+        base = base_branch or self.get_default_branch()
+
+        try:
+            # Get ahead/behind relative to base branch
+            ahead_behind = repo.git.rev_list(
+                "--left-right", "--count", f"{base}...{branch}"
+            )
+            parts = ahead_behind.split()
+            behind_main = int(parts[0]) if len(parts) >= 1 else 0
+            ahead_main = int(parts[1]) if len(parts) >= 2 else 0
+
+            # Check if branch exists on remote
+            is_pushed = False
+            try:
+                repo.git.rev_parse("--verify", f"refs/remotes/origin/{branch}")
+                is_pushed = True
+            except Exception:
+                pass
+
+            # Get last commit info
+            last_commit = repo.git.log("-1", "--format=%h %s", branch)
+
+            return {
+                "branch": branch,
+                "base_branch": base,
+                "ahead_of_base": ahead_main,
+                "behind_base": behind_main,
+                "is_pushed": is_pushed,
+                "last_commit": last_commit,
+            }
+
+        except Exception as e:
+            return {
+                "branch": branch,
+                "base_branch": base,
+                "error": str(e),
+            }
+
+    def push_branch(self, branch: str, force: bool = False) -> dict:
+        """Push a branch to origin.
+
+        Args:
+            branch: Branch to push.
+            force: Force push.
+
+        Returns:
+            Dictionary with push result.
+        """
+        try:
+            if force:
+                self.repo.git.push("origin", branch, "--force")
+            else:
+                self.repo.git.push("origin", branch, "-u")
+
+            return {
+                "branch": branch,
+                "pushed": True,
+            }
+        except GitCommandError as e:
+            return {
+                "branch": branch,
+                "pushed": False,
+                "error": str(e),
+            }
+
     def get_default_branch(self) -> str:
         """Get the default branch name.
 
@@ -305,6 +384,17 @@ class GitOperations:
             return True
         except Exception:
             return False
+
+    def get_current_branch(self) -> str:
+        """Get the current branch name.
+
+        Returns:
+            Current branch name or 'HEAD' if detached.
+        """
+        try:
+            return self.repo.active_branch.name
+        except TypeError:
+            return "HEAD"
 
     def get_short_sha(self, ref: str = "HEAD") -> str:
         """Get short SHA for a ref.

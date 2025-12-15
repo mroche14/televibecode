@@ -5,6 +5,7 @@ from televibecode.db.models import (
     Approval,
     ApprovalState,
     ApprovalType,
+    ExecutionMode,
     Job,
     JobStatus,
     Project,
@@ -17,6 +18,7 @@ from televibecode.db.models import (
 
 __all__ = [
     "Database",
+    "ExecutionMode",
     "Project",
     "Session",
     "SessionState",

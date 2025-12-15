@@ -31,13 +31,26 @@ class Settings(BaseSettings):
     @field_validator("telegram_allowed_chat_ids", mode="before")
     @classmethod
     def parse_chat_ids(cls, v: str | list[int] | None) -> list[int]:
-        """Parse chat IDs from comma-separated string or list."""
+        """Parse chat IDs from comma-separated string or list.
+
+        Handles:
+        - Comma-separated: "123,456,789"
+        - With # prefix: "#123,#456" (from some Telegram clients)
+        - Mixed: "123,#456,789"
+        """
         if v is None or v == "":
             return []
         if isinstance(v, list):
             return v
-        # Parse comma-separated string: "123,456,789"
-        return [int(x.strip()) for x in str(v).split(",") if x.strip()]
+        # Parse comma-separated string, stripping # prefix if present
+        ids = []
+        for x in str(v).split(","):
+            x = x.strip()
+            if x.startswith("#"):
+                x = x[1:]  # Remove # prefix
+            if x:
+                ids.append(int(x))
+        return ids
 
     # AI Provider API Keys (set whichever you have)
     gemini_api_key: str | None = Field(

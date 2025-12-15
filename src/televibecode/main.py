@@ -265,6 +265,15 @@ async def serve(root: Path) -> None:
         ai_providers=ai_providers or ["none"],
     )
 
+    # Write health flag for supervisor
+    health_file = Path.home() / ".televibe" / "health.flag"
+    health_file.parent.mkdir(parents=True, exist_ok=True)
+    health_file.write_text("ok")
+    log.info("health_flag_written", path=str(health_file))
+
+    # Handle post-restart notifications
+    await bot.handle_post_restart()
+
     # Wait for shutdown signal
     await shutdown_event.wait()
 
@@ -313,12 +322,26 @@ def main() -> None:
         help="Directory to scan (default: current directory)",
     )
 
+    # supervised command (runs with self-healing supervisor)
+    supervised_parser = subparsers.add_parser(
+        "supervised",
+        help="Start TeleVibeCode with self-healing supervisor",
+    )
+    supervised_parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.home() / "projects",
+        help="Projects root directory (default: ~/projects)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "serve":
         asyncio.run(serve(args.root))
     elif args.command == "scan":
         asyncio.run(scan_only(args.root))
+    elif args.command == "supervised":
+        run_supervised(args.root)
     else:
         parser.print_help()
         sys.exit(1)
@@ -350,6 +373,23 @@ async def scan_only(root: Path) -> None:
         print()
 
     await db.close()
+
+
+def run_supervised(root: Path) -> None:
+    """Run TeleVibeCode with the self-healing supervisor.
+
+    The supervisor will:
+    - Monitor the TeleVibeCode process
+    - Handle restart requests via /restart command
+    - Spawn Claude Code to fix issues if startup fails
+    - Revert to last working commit if healing fails
+
+    Args:
+        root: Projects root directory.
+    """
+    from televibecode.supervisor import main as supervisor_main
+
+    supervisor_main(root)
 
 
 if __name__ == "__main__":

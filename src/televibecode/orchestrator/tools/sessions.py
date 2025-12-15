@@ -5,10 +5,8 @@ from pathlib import Path
 
 from televibecode.config import Settings
 from televibecode.db import Database, Session, SessionState
-from televibecode.orchestrator.tools.git_ops import (
-    GitOperations,
-    generate_session_branch,
-)
+from televibecode.db.models import ExecutionMode
+from televibecode.orchestrator.tools.git_ops import GitOperations
 
 
 async def list_sessions(
@@ -40,6 +38,7 @@ async def list_sessions(
             "display_name": s.display_name,
             "branch": s.branch,
             "state": s.state.value,
+            "execution_mode": s.execution_mode.value,
             "workspace_path": s.workspace_path,
             "current_job_id": s.current_job_id,
             "last_activity_at": s.last_activity_at.isoformat(),
@@ -70,6 +69,7 @@ async def get_session(db: Database, session_id: str) -> dict | None:
         "workspace_path": session.workspace_path,
         "branch": session.branch,
         "state": session.state.value,
+        "execution_mode": session.execution_mode.value,
         "superclaude_profile": session.superclaude_profile,
         "mcp_profile": session.mcp_profile,
         "attached_task_ids": session.attached_task_ids,
@@ -88,15 +88,17 @@ async def create_session(
     project_id: str,
     branch: str | None = None,
     display_name: str | None = None,
+    execution_mode: ExecutionMode = ExecutionMode.WORKTREE,
 ) -> dict:
-    """Create a new session with a git worktree.
+    """Create a new session.
 
     Args:
         db: Database instance.
         settings: Application settings.
         project_id: Project to create session for.
-        branch: Optional branch name (auto-generated if not provided).
+        branch: Optional branch name (auto-generated if not provided for worktree).
         display_name: Optional display name for the session.
+        execution_mode: WORKTREE (isolated worktree) or DIRECT (project folder).
 
     Returns:
         Created session dictionary.
@@ -111,20 +113,79 @@ async def create_session(
 
     # Generate session ID: project_YYYYMMDD_HHMMSS
     from datetime import datetime
+
     now = datetime.now()
     session_id = f"{project_id}_{now.strftime('%Y%m%d_%H%M%S')}"
 
+    git_ops = GitOperations(project.path)
+
+    if execution_mode == ExecutionMode.DIRECT:
+        # Direct mode: run in project folder directly
+        workspace_path = Path(project.path)
+
+        # Get current branch from the project
+        if not branch:
+            branch = git_ops.get_current_branch()
+
+        # Check for existing direct sessions on same project
+        existing_sessions = await db.get_sessions_by_project(project_id)
+        for existing in existing_sessions:
+            if (
+                existing.execution_mode == ExecutionMode.DIRECT
+                and existing.state != SessionState.CLOSING
+            ):
+                raise ValueError(
+                    f"Project '{project_id}' already has an active direct session "
+                    f"'{existing.session_id}'. Close it first or use worktree mode."
+                )
+
+        # Create session in database
+        session = Session(
+            session_id=session_id,
+            project_id=project_id,
+            display_name=display_name,
+            workspace_path=str(workspace_path),
+            branch=branch,
+            state=SessionState.IDLE,
+            execution_mode=ExecutionMode.DIRECT,
+        )
+
+        await db.create_session(session)
+
+        return {
+            "session_id": session.session_id,
+            "project_id": project_id,
+            "project_name": project.name,
+            "display_name": display_name,
+            "branch": branch,
+            "workspace_path": str(workspace_path),
+            "execution_mode": "direct",
+            "state": session.state.value,
+            "message": (
+                f"Session {session_id} created in direct mode for {project.name} "
+                f"(running in project folder)"
+            ),
+        }
+
+    # Worktree mode (default): create isolated git worktree
     # Generate branch name if not provided
     if not branch:
         branch = f"televibe/{session_id}"
+
+    # Check for duplicate branch sessions
+    existing_sessions = await db.get_sessions_by_project(project_id)
+    for existing in existing_sessions:
+        if existing.branch == branch and existing.state != SessionState.CLOSING:
+            raise ValueError(
+                f"Branch '{branch}' is already in use by session "
+                f"'{existing.session_id}'. Close that session first or "
+                "use a different branch."
+            )
 
     # Set up worktree path
     workspace_path = settings.workspaces_dir / session_id
     if workspace_path.exists():
         raise ValueError(f"Workspace path already exists: {workspace_path}")
-
-    # Create git worktree
-    git_ops = GitOperations(project.path)
 
     # Check if branch exists
     branch_exists = git_ops.branch_exists(branch)
@@ -147,6 +208,7 @@ async def create_session(
         workspace_path=str(workspace_path),
         branch=branch,
         state=SessionState.IDLE,
+        execution_mode=ExecutionMode.WORKTREE,
     )
 
     await db.create_session(session)
@@ -158,6 +220,7 @@ async def create_session(
         "display_name": display_name,
         "branch": branch,
         "workspace_path": str(workspace_path),
+        "execution_mode": "worktree",
         "state": session.state.value,
         "message": (
             f"Session {session_id} created for {project.name} on branch {branch}"
@@ -165,17 +228,80 @@ async def create_session(
     }
 
 
+async def get_session_branch_status(
+    db: Database,
+    session_id: str,
+) -> dict:
+    """Get branch status for a session (for close confirmation).
+
+    Args:
+        db: Database instance.
+        session_id: Session to check.
+
+    Returns:
+        Dictionary with branch status info.
+    """
+    session = await db.get_session(session_id)
+    if not session:
+        raise ValueError(f"Session '{session_id}' not found")
+
+    project = await db.get_project(session.project_id)
+    if not project:
+        return {
+            "session_id": session_id,
+            "branch": session.branch,
+            "project_missing": True,
+        }
+
+    # Get branch drift info
+    workspace_path = Path(session.workspace_path)
+    if not workspace_path.exists():
+        return {
+            "session_id": session_id,
+            "branch": session.branch,
+            "workspace_missing": True,
+        }
+
+    git_ops = GitOperations(project.path)
+
+    # Get working directory status
+    work_status = git_ops.get_branch_status(workspace_path)
+
+    # Get drift from main
+    drift = git_ops.get_branch_drift(session.branch, worktree_path=workspace_path)
+
+    return {
+        "session_id": session_id,
+        "project_id": session.project_id,
+        "project_name": project.name,
+        "branch": session.branch,
+        "has_uncommitted": work_status.get("has_changes", False),
+        "uncommitted_count": (
+            work_status.get("staged", 0)
+            + work_status.get("unstaged", 0)
+            + work_status.get("untracked", 0)
+        ),
+        "ahead_of_main": drift.get("ahead_of_base", 0),
+        "behind_main": drift.get("behind_base", 0),
+        "is_pushed": drift.get("is_pushed", False),
+        "last_commit": drift.get("last_commit", ""),
+        "base_branch": drift.get("base_branch", "main"),
+    }
+
+
 async def close_session(
     db: Database,
     session_id: str,
     force: bool = False,
+    delete_branch: bool = False,
 ) -> dict:
-    """Close a session and clean up its worktree.
+    """Close a session and clean up its worktree (if applicable).
 
     Args:
         db: Database instance.
         session_id: Session to close.
         force: If True, force close even with uncommitted changes.
+        delete_branch: If True, also delete the git branch (worktree mode only).
 
     Returns:
         Result dictionary.
@@ -198,9 +324,11 @@ async def close_session(
     project = await db.get_project(session.project_id)
     if not project:
         # Project was deleted, just clean up the session
-        workspace_path = Path(session.workspace_path)
-        if workspace_path.exists():
-            shutil.rmtree(workspace_path)
+        # Only remove workspace if worktree mode
+        if session.execution_mode == ExecutionMode.WORKTREE:
+            workspace_path = Path(session.workspace_path)
+            if workspace_path.exists():
+                shutil.rmtree(workspace_path)
         await db.delete_session(session_id)
         return {
             "session_id": session_id,
@@ -208,20 +336,34 @@ async def close_session(
             "note": "Project no longer exists, session cleaned up",
         }
 
-    # Remove worktree
-    workspace_path = Path(session.workspace_path)
     worktree_removed = False
+    branch_deleted = False
 
-    if workspace_path.exists():
-        git_ops = GitOperations(project.path)
-        try:
-            git_ops.remove_worktree(workspace_path, force=force)
-            worktree_removed = True
-        except Exception:
-            # Fall back to manual removal
-            if force:
-                shutil.rmtree(workspace_path)
+    # Only handle worktree cleanup for worktree mode
+    if session.execution_mode == ExecutionMode.WORKTREE:
+        # Remove worktree
+        workspace_path = Path(session.workspace_path)
+
+        if workspace_path.exists():
+            git_ops = GitOperations(project.path)
+            try:
+                git_ops.remove_worktree(workspace_path, force=force)
                 worktree_removed = True
+            except Exception:
+                # Fall back to manual removal
+                if force:
+                    shutil.rmtree(workspace_path)
+                    worktree_removed = True
+
+        # Optionally delete the branch (only for worktree sessions)
+        if delete_branch and project:
+            git_ops = GitOperations(project.path)
+            try:
+                git_ops.delete_branch(session.branch, force=force)
+                branch_deleted = True
+            except Exception:
+                # Branch deletion failed, but session still closes
+                pass
 
     # Update session state
     session.state = SessionState.CLOSING
@@ -234,9 +376,43 @@ async def close_session(
         "session_id": session_id,
         "project_id": session.project_id,
         "branch": session.branch,
+        "execution_mode": session.execution_mode.value,
         "closed": True,
         "worktree_removed": worktree_removed,
+        "branch_deleted": branch_deleted,
         "message": f"Session {session_id} closed",
+    }
+
+
+async def push_session_branch(
+    db: Database,
+    session_id: str,
+) -> dict:
+    """Push the session's branch to origin.
+
+    Args:
+        db: Database instance.
+        session_id: Session whose branch to push.
+
+    Returns:
+        Dictionary with push result.
+    """
+    session = await db.get_session(session_id)
+    if not session:
+        raise ValueError(f"Session '{session_id}' not found")
+
+    project = await db.get_project(session.project_id)
+    if not project:
+        raise ValueError(f"Project '{session.project_id}' not found")
+
+    git_ops = GitOperations(project.path)
+    result = git_ops.push_branch(session.branch)
+
+    return {
+        "session_id": session_id,
+        "branch": session.branch,
+        "pushed": result.get("pushed", False),
+        "error": result.get("error"),
     }
 
 
@@ -327,6 +503,7 @@ async def get_session_status(
         "display_name": session.display_name,
         "branch": session.branch,
         "state": session.state.value,
+        "execution_mode": session.execution_mode.value,
         "workspace_path": session.workspace_path,
         "git_status": git_status,
         "recent_jobs": recent_jobs,

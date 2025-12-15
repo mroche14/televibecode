@@ -7,6 +7,11 @@ from televibecode.ai.intent import (
     classify_message,
     get_classifier,
 )
+from televibecode.ai.mode_selector import (
+    ModeRecommendation,
+    format_mode_choice_prompt,
+    suggest_execution_mode,
+)
 from televibecode.ai.transcription import (
     transcribe_audio,
     transcribe_telegram_voice,
@@ -45,6 +50,10 @@ __all__ = [
     "get_classifier",
     "transcribe_audio",
     "transcribe_telegram_voice",
+    # Mode selector
+    "ModeRecommendation",
+    "suggest_execution_mode",
+    "format_mode_choice_prompt",
     # Agent
     "AGENT_AVAILABLE",
     "TeleVibeAgent",

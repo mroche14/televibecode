@@ -161,12 +161,31 @@ Job updates:
 
 ## Session Lifecycle
 
-1. **Creation**: User requests new session on project + branch
-2. **Worktree Setup**: Git worktree created in `/workspaces/<project>/<session>/<branch>/`
-3. **Configuration**: SuperClaude profile + MCP servers configured
-4. **Execution**: Jobs run via Runner in workspace directory
-5. **Monitoring**: Status, logs, summaries streamed to Telegram
-6. **Closure**: Worktree cleaned up, session archived
+> **📖 See [Data Models: Core Concepts](data-models.md#core-concepts-projects-sessions-branches-worktrees-and-jobs) for detailed entity relationships.**
+
+Sessions use **git worktrees** for isolation - each session gets its own working directory on a dedicated branch:
+
+```
+Project (main repo)              Session Worktrees
+~/projects/my-app/      ───►     ~/.televibe/workspaces/
+    │                                ├── my-app_20241214_153042/  (Session S1)
+    │                                │   └── branch: televibe/...153042
+    └── .git/                        └── my-app_20241214_160000/  (Session S2)
+        └── worktrees/                   └── branch: televibe/...160000
+```
+
+**Lifecycle steps:**
+
+1. **Creation** (`/new`): Generate session ID, create branch, set up worktree
+2. **Execution** (`/run`): Jobs run Claude Code in the worktree directory
+3. **Monitoring** (`/status`): Track drift from main, push status, uncommitted changes
+4. **Closure** (`/close`): Choose to delete/keep/push branch, remove worktree
+
+**Key constraints:**
+- One branch per session (1:1)
+- No two sessions can share the same branch
+- Only one job runs at a time per session
+- Max 10 sessions per project, 50 total
 
 ## Approval Gating
 

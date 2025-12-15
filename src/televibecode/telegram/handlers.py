@@ -1,8 +1,17 @@
 """Telegram command handlers."""
 
 import contextlib
+import json
+from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+import structlog
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReactionTypeEmoji,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -21,10 +30,11 @@ from televibecode.ai.tool_tester import (
 try:
     from televibecode.ai.agent import (
         TeleVibeAgent,
+        clear_pending_action,
         get_agent,
         get_pending_action,
-        clear_pending_action,
     )
+
     AGENT_AVAILABLE = True
 except ImportError:
     AGENT_AVAILABLE = False
@@ -35,6 +45,7 @@ except ImportError:
 from televibecode.config import Settings
 from televibecode.db import (
     Database,
+    ExecutionMode,
     JobStatus,
     SessionState,
     TaskPriority,
@@ -49,6 +60,8 @@ from televibecode.runner import (
 )
 from televibecode.telegram.formatters import format_project_list, format_session_list
 from televibecode.telegram.state import ChatStateManager
+
+log = structlog.get_logger()
 
 __all__ = [
     "start_command",
@@ -87,6 +100,12 @@ __all__ = [
     "newproject_callback_handler",
     "reset_command",
     "agent_callback_handler",
+    "close_callback_handler",
+    "choice_callback_handler",
+    "tracker_command",
+    "tracker_callback_handler",
+    "push_command",
+    "restart_command",
 ]
 
 
@@ -99,6 +118,35 @@ def _session_state_icon(state: SessionState) -> str:
         SessionState.CLOSING: "🔴",
     }
     return icons.get(state, "❓")
+
+
+async def add_reaction(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    emoji: str,
+) -> bool:
+    """Add a reaction emoji to a message.
+
+    Args:
+        context: Bot context.
+        chat_id: Chat ID.
+        message_id: Message ID to react to.
+        emoji: Reaction emoji (e.g., "👀", "✅", "❌").
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji)],
+        )
+        return True
+    except Exception:
+        # Reactions may not be available in all chats
+        return False
 
 
 def build_session_keyboard(
@@ -154,6 +202,21 @@ def build_session_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
+def escape_markdown(text: str) -> str:
+    """Escape special Markdown characters for Telegram.
+
+    Args:
+        text: Text to escape.
+
+    Returns:
+        Escaped text safe for Markdown parsing.
+    """
+    # Escape characters that can break Telegram Markdown
+    for char in ['_', '*', '[', ']', '`']:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
 def get_db(context: ContextTypes.DEFAULT_TYPE) -> Database:
     """Get database from context."""
     return context.bot_data["db"]
@@ -167,6 +230,11 @@ def get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
 def get_chat_state(context: ContextTypes.DEFAULT_TYPE) -> ChatStateManager:
     """Get chat state manager from context."""
     return context.bot_data["chat_state"]
+
+
+def get_tracker_manager(context: ContextTypes.DEFAULT_TYPE):
+    """Get job tracker manager from context."""
+    return context.bot_data.get("tracker_manager")
 
 
 async def send_with_context(
@@ -427,8 +495,7 @@ async def newproject_command(
     )
 
     await update.message.reply_text(
-        f"📂 Creating project `{name}`\n\n"
-        "Create a remote repository?",
+        f"📂 Creating project `{name}`\n\nCreate a remote repository?",
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
@@ -512,9 +579,7 @@ async def newproject_callback_handler(
         )
 
         with contextlib.suppress(BadRequest):
-            await query.edit_message_text(
-                "\n".join(msg_lines), parse_mode="Markdown"
-            )
+            await query.edit_message_text("\n".join(msg_lines), parse_mode="Markdown")
 
     except ValueError as e:
         with contextlib.suppress(BadRequest):
@@ -582,7 +647,7 @@ async def new_session_command(
 ) -> None:
     """Handle /new command - create a new session.
 
-    Usage: /new <project_id> [branch] [name]
+    Usage: /new <project_id> [branch] [name] [--direct]
     """
     db = get_db(context)
     settings = get_settings(context)
@@ -591,18 +656,38 @@ async def new_session_command(
 
     if not args:
         await update.message.reply_text(
-            "Usage: `/new <project_id> [branch] [name]`\n\n"
+            "Usage: `/new <project_id> [branch] [name] [--direct]`\n\n"
             "Examples:\n"
-            "  `/new myproject` - auto-generate branch\n"
-            "  `/new myproject feature-x` - use specific branch\n"
-            '  `/new myproject feature-x "Fix auth bug"`',
+            "  `/new myproject` - worktree (default)\n"
+            "  `/new myproject --direct` - run in project folder\n"
+            "  `/new myproject feature-x` - specific branch\n"
+            '  `/new myproject feature-x "Fix auth bug"`\n\n'
+            "Modes:\n"
+            "  🌳 worktree (default): Isolated branch, safe for experiments\n"
+            "  📁 --direct: Run directly in project folder, fast for quick fixes",
             parse_mode="Markdown",
         )
         return
 
-    project_id = args[0]
-    branch = args[1] if len(args) > 1 else None
-    display_name = " ".join(args[2:]) if len(args) > 2 else None
+    # Parse --direct flag
+    execution_mode = ExecutionMode.WORKTREE
+    filtered_args = []
+    for arg in args:
+        if arg.lower() in ("--direct", "-d"):
+            execution_mode = ExecutionMode.DIRECT
+        else:
+            filtered_args.append(arg)
+
+    if not filtered_args:
+        await update.message.reply_text(
+            "Please specify a project ID.\n\nUsage: `/new <project_id> [--direct]`",
+            parse_mode="Markdown",
+        )
+        return
+
+    project_id = filtered_args[0]
+    branch = filtered_args[1] if len(filtered_args) > 1 else None
+    display_name = " ".join(filtered_args[2:]) if len(filtered_args) > 2 else None
 
     # Remove quotes from display name if present
     if display_name:
@@ -615,16 +700,20 @@ async def new_session_command(
             project_id=project_id,
             branch=branch,
             display_name=display_name,
+            execution_mode=execution_mode,
         )
 
         # Set as active session for this chat
         chat_id = update.effective_chat.id
         chat_state.set_active_session(chat_id, result["session_id"])
 
+        mode_icon = "📁" if execution_mode == ExecutionMode.DIRECT else "🌳"
+        mode_name = "direct" if execution_mode == ExecutionMode.DIRECT else "worktree"
         text = (
             f"*Session Created*\n\n"
             f"📂 `{result['session_id']}` on `{result['project_name']}`\n"
             f"🌿 Branch: `{result['branch']}`\n"
+            f"{mode_icon} Mode: {mode_name}\n"
             f"📍 {result['workspace_path']}\n\n"
             f"_This is now your active session._"
         )
@@ -713,7 +802,7 @@ async def use_session_command(
 async def close_session_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle /close command - close a session.
+    """Handle /close command - close a session with branch options.
 
     Usage: /close [session_id] [--force]
     """
@@ -723,12 +812,9 @@ async def close_session_command(
 
     # Parse args
     session_id = None
-    force = False
 
     for arg in args:
-        if arg in ("--force", "-f"):
-            force = True
-        elif not session_id:
+        if not session_id:
             session_id = arg.upper()
             if not session_id.startswith("S"):
                 session_id = f"S{session_id}"
@@ -747,29 +833,244 @@ async def close_session_command(
             return
 
     try:
-        result = await sessions.close_session(
-            db=db,
-            session_id=session_id,
-            force=force,
+        # Get branch status for confirmation
+        status = await sessions.get_session_branch_status(db, session_id)
+
+        # Build status message
+        branch = status.get("branch", "unknown")
+        project_name = status.get("project_name", status.get("project_id", "unknown"))
+        ahead = status.get("ahead_of_main", 0)
+        behind = status.get("behind_main", 0)
+        is_pushed = status.get("is_pushed", False)
+        has_uncommitted = status.get("has_uncommitted", False)
+        base = status.get("base_branch", "main")
+
+        # Build info text
+        text = f"🗑️ *Close session {session_id}?*\n\n"
+        text += f"📂 Project: **{project_name}**\n"
+        text += f"🌿 Branch: `{branch}`\n\n"
+
+        # Status indicators
+        if has_uncommitted:
+            text += "⚠️ Has uncommitted changes!\n"
+        if ahead > 0:
+            text += f"📈 {ahead} commits ahead of {base}\n"
+        if behind > 0:
+            text += f"📉 {behind} commits behind {base}\n"
+        if is_pushed:
+            text += "☁️ Branch is pushed to origin\n"
+        else:
+            text += "💾 Branch is local only (not pushed)\n"
+
+        text += "\n*What about the branch?*"
+
+        # Build keyboard with options
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🗑️ Delete branch",
+                        callback_data=f"close:{session_id}:delete",
+                    ),
+                    InlineKeyboardButton(
+                        "📌 Keep branch",
+                        callback_data=f"close:{session_id}:keep",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬆️ Push first",
+                        callback_data=f"close:{session_id}:push",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Cancel",
+                        callback_data=f"close:{session_id}:cancel",
+                    ),
+                ],
+            ]
         )
 
-        # Clear active session if it was this one
-        chat_id = update.effective_chat.id
-        if chat_state.get_active_session(chat_id) == session_id:
-            chat_state.set_active_session(chat_id, None)
-
         await update.message.reply_text(
-            f"Session `{session_id}` closed.\n"
-            f"Branch: `{result.get('branch', 'N/A')}`\n"
-            f"Worktree removed: {'Yes' if result.get('worktree_removed') else 'No'}",
-            parse_mode="Markdown",
+            text, parse_mode="Markdown", reply_markup=keyboard
         )
 
     except ValueError as e:
         await update.message.reply_text(
-            f"Failed to close session: {e}\n\n_Use `--force` to force close._",
+            f"Failed: {e}",
             parse_mode="Markdown",
         )
+
+
+async def close_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle close session callbacks (delete/keep/push branch)."""
+    query = update.callback_query
+    await query.answer()
+
+    db = get_db(context)
+    chat_state = get_chat_state(context)
+    chat_id = update.effective_chat.id
+
+    # Parse callback: close:SESSION_ID:ACTION
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.edit_message_text("Invalid callback data.")
+        return
+
+    _, session_id, action = parts
+
+    if action == "cancel":
+        await query.edit_message_text("Close cancelled.")
+        return
+
+    if action == "push":
+        # Push first, then show options again
+        try:
+            result = await sessions.push_session_branch(db, session_id)
+            if result.get("pushed"):
+                await query.edit_message_text(
+                    "✅ Branch pushed to origin.\n\nNow close the session?",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🗑️ Delete branch",
+                                    callback_data=f"close:{session_id}:delete",
+                                ),
+                                InlineKeyboardButton(
+                                    "📌 Keep branch",
+                                    callback_data=f"close:{session_id}:keep",
+                                ),
+                            ],
+                            [
+                                InlineKeyboardButton(
+                                    "❌ Cancel",
+                                    callback_data=f"close:{session_id}:cancel",
+                                )
+                            ],
+                        ]
+                    ),
+                )
+            else:
+                keep_cb = f"close:{session_id}:keep"
+                cancel_cb = f"close:{session_id}:cancel"
+                await query.edit_message_text(
+                    f"❌ Push failed: {result.get('error', 'Unknown error')}\n\n"
+                    "Close anyway?",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton("📌 Keep", callback_data=keep_cb),
+                                InlineKeyboardButton(
+                                    "❌ Cancel", callback_data=cancel_cb
+                                ),
+                            ],
+                        ]
+                    ),
+                )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Push failed: {e}")
+        return
+
+    # Close the session
+    delete_branch = action == "delete"
+
+    try:
+        result = await sessions.close_session(
+            db=db,
+            session_id=session_id,
+            force=True,
+            delete_branch=delete_branch,
+        )
+
+        # Clear active session if it was this one
+        if chat_state.get_active_session(chat_id) == session_id:
+            chat_state.set_active_session(chat_id, None)
+
+        branch_status = ""
+        if delete_branch:
+            if result.get("branch_deleted"):
+                branch_status = "🗑️ Branch deleted"
+            else:
+                branch_status = "⚠️ Branch kept (deletion failed)"
+        else:
+            branch_status = "📌 Branch kept for later"
+
+        await query.edit_message_text(
+            f"✅ Session `{session_id}` closed.\n\n"
+            f"🌿 Branch: `{result.get('branch', 'N/A')}`\n"
+            f"{branch_status}",
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        await query.edit_message_text(f"❌ Failed to close: {e}")
+
+
+async def push_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /push command - push session branch to origin.
+
+    Usage: /push [session_id]
+    """
+    db = get_db(context)
+    chat_state = get_chat_state(context)
+    chat_id = update.effective_chat.id
+    args = context.args or []
+
+    # Get session ID
+    session_id = None
+    if args:
+        session_id = args[0].upper()
+        if not session_id.startswith("S"):
+            session_id = f"S{session_id}"
+    else:
+        session_id = chat_state.get_active_session(chat_id)
+
+    if not session_id:
+        await update.message.reply_text(
+            "No session specified and no active session.\n\n"
+            "Usage: `/push <session_id>` or set an active session first.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Get session info first
+    try:
+        session = await sessions.get_session(db, session_id)
+        if not session:
+            await update.message.reply_text(
+                f"Session `{session_id}` not found.", parse_mode="Markdown"
+            )
+            return
+    except ValueError as e:
+        await update.message.reply_text(f"Error: {e}")
+        return
+
+    # Show pushing status
+    status_msg = await update.message.reply_text(
+        f"☁️ Pushing branch `{session.get('branch', 'unknown')}` to origin...",
+        parse_mode="Markdown",
+    )
+
+    try:
+        result = await sessions.push_session_branch(db, session_id)
+
+        if result.get("pushed"):
+            await status_msg.edit_text(
+                f"✅ Pushed `{result.get('branch')}` to origin.\n\n"
+                f"Session: `{session_id}`",
+                parse_mode="Markdown",
+            )
+        else:
+            error = result.get("error", "Unknown error")
+            await status_msg.edit_text(
+                f"❌ Push failed for `{result.get('branch')}`:\n\n{error}",
+                parse_mode="Markdown",
+            )
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
 
 
 async def cleanup_sessions_command(
@@ -792,15 +1093,17 @@ async def cleanup_sessions_command(
 
     if not force:
         # Ask for confirmation
-        keyboard = InlineKeyboardMarkup([
+        keyboard = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton(
-                    f"🗑️ Yes, close all {len(all_sessions)} sessions",
-                    callback_data="cleanup:confirm",
-                ),
-            ],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cleanup:cancel")],
-        ])
+                [
+                    InlineKeyboardButton(
+                        f"🗑️ Yes, close all {len(all_sessions)} sessions",
+                        callback_data="cleanup:confirm",
+                    ),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cleanup:cancel")],
+            ]
+        )
 
         session_list = "\n".join(
             f"• `{s.session_id}` - {s.project_id}" for s in all_sessions[:10]
@@ -833,20 +1136,26 @@ async def _do_cleanup_all_sessions(update, context, all_sessions) -> None:
 
     for session in all_sessions:
         try:
-            await sessions.close_session(db=db, session_id=session.session_id, force=True)
+            await sessions.close_session(
+                db=db, session_id=session.session_id, force=True
+            )
             closed += 1
             log.info("cleanup_session_closed", session_id=session.session_id)
         except Exception as e:
             failed += 1
             errors.append(f"{session.session_id}: {e}")
-            log.error("cleanup_session_failed", session_id=session.session_id, error=str(e))
+            log.error(
+                "cleanup_session_failed",
+                session_id=session.session_id,
+                error=str(e),
+            )
 
     # Clear active session
     chat_state.set_active_session(chat_id, None)
 
     msg = f"🧹 *Cleanup Complete*\n\n✅ Closed: {closed}\n❌ Failed: {failed}"
     if errors:
-        msg += f"\n\nErrors:\n" + "\n".join(errors[:5])
+        msg += "\n\nErrors:\n" + "\n".join(errors[:5])
 
     # Handle both message and callback query
     if update.callback_query:
@@ -909,21 +1218,49 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text += f"🌿 Branch: `{status['branch']}`\n"
         text += f"🔹 State: {status['state']}\n"
 
-        # Git status
+        # Get branch drift status (ahead/behind main, pushed status)
+        try:
+            branch_status = await sessions.get_session_branch_status(db, session_id)
+            text += "\n*Branch Status*:\n"
+
+            # Show ahead/behind main
+            ahead = branch_status.get("ahead_of_main", 0)
+            behind = branch_status.get("behind_main", 0)
+            base = branch_status.get("base_branch", "main")
+
+            if ahead > 0:
+                text += f"  ⬆️ {ahead} commit(s) ahead of {base}\n"
+            if behind > 0:
+                text += f"  ⬇️ {behind} commit(s) behind {base}\n"
+            if ahead == 0 and behind == 0:
+                text += f"  ✅ In sync with {base}\n"
+
+            # Show pushed status
+            if branch_status.get("is_pushed"):
+                text += "  ☁️ Pushed to origin\n"
+            else:
+                text += "  📍 Local only (not pushed)\n"
+
+            # Show last commit
+            last_commit = branch_status.get("last_commit", "")
+            if last_commit:
+                # Truncate if too long
+                if len(last_commit) > 50:
+                    last_commit = last_commit[:50] + "..."
+                text += f"  📝 Last: `{last_commit}`\n"
+        except Exception:
+            pass  # Branch status is optional enhancement
+
+        # Git working directory status
         git = status.get("git_status")
         if git and not git.get("error"):
-            text += "\n*Git Status*:\n"
+            text += "\n*Working Directory*:\n"
             if git.get("has_changes"):
                 text += f"  📝 Staged: {git['staged']}\n"
                 text += f"  📝 Unstaged: {git['unstaged']}\n"
                 text += f"  📝 Untracked: {git['untracked']}\n"
             else:
-                text += "  Clean working tree\n"
-
-            if git.get("ahead", 0) > 0:
-                text += f"  ⬆️ Ahead by {git['ahead']} commit(s)\n"
-            if git.get("behind", 0) > 0:
-                text += f"  ⬇️ Behind by {git['behind']} commit(s)\n"
+                text += "  ✅ Clean working tree\n"
 
         # Recent jobs
         jobs = status.get("recent_jobs", [])
@@ -1683,9 +2020,12 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     Usage: /run [session_id] <instruction>
     """
+    from televibecode.tracker import get_preset
+
     db = get_db(context)
     settings = get_settings(context)
     chat_state = get_chat_state(context)
+    tracker_manager = get_tracker_manager(context)
     chat_id = update.effective_chat.id
 
     args = context.args or []
@@ -1735,10 +2075,12 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Show typing indicator
+    # Show typing indicator and "processing" reaction
     await context.bot.send_chat_action(chat_id, "typing")
+    message_id = update.message.message_id
+    await add_reaction(context, chat_id, message_id, "👀")
 
-    # Send initial status message
+    # Get session
     session = await db.get_session(session_id)
     if not session:
         await update.message.reply_text(f"Session `{session_id}` not found.")
@@ -1747,57 +2089,98 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     project = await db.get_project(session.project_id)
     project_name = project.name if project else session.project_id
 
-    instr_display = instruction[:100] + "..." if len(instruction) > 100 else instruction
-    status_msg = await send_with_context(
-        update,
-        context,
-        f"*Starting Job*\n\n"
-        f"📂 {project_name} / `{session_id}`\n"
-        f"🌿 Branch: `{session.branch}`\n\n"
-        f"📝 _{instr_display}_\n\n"
-        f"⏳ Queued...",
-        session_id=session_id,
-        project_id=session.project_id,
-        message_type="job",
-        parse_mode="Markdown",
-    )
+    # Load tracker config for this chat
+    if tracker_manager:
+        preset_name, config_overrides = await db.get_tracker_config(chat_id)
+        base_config = get_preset(preset_name)
+        # Apply overrides
+        for key, value in config_overrides.items():
+            if hasattr(base_config, key):
+                setattr(base_config, key, value)
+        tracker_manager.set_chat_config(chat_id, base_config)
 
     try:
+        # Create tracker message (separate from legacy status message)
+        tracker_state = None
+        if tracker_manager:
+            tracker_state = await tracker_manager.create_tracker(
+                chat_id=chat_id,
+                job_id="pending",  # Will be updated after job creation
+                session_id=session_id,
+                project_name=project_name,
+                instruction=instruction,
+            )
+
+        # Define callbacks for the executor
+        def on_event(job_id: str, event):
+            """Forward events to tracker manager."""
+            if tracker_manager and tracker_state:
+                import asyncio
+
+                asyncio.create_task(tracker_manager.add_event(job_id, event))
+
+        def on_complete(completed_job):
+            """Handle job completion."""
+            import asyncio
+
+            # Add completion reaction to the original command message
+            reaction = "✅" if completed_job.status.value == "done" else "❌"
+            asyncio.create_task(add_reaction(context, chat_id, message_id, reaction))
+
+            if tracker_manager and tracker_state:
+                status = "done" if completed_job.status.value == "done" else "failed"
+                if completed_job.status.value == "cancelled":
+                    status = "cancelled"
+
+                asyncio.create_task(
+                    tracker_manager.complete_tracker(
+                        job_id=completed_job.job_id,
+                        status=status,
+                        result=completed_job.result_summary,
+                        error=completed_job.error,
+                        files_changed=completed_job.files_changed,
+                    )
+                )
+
         # Run the job
         job = await run_instruction(
             db=db,
             settings=settings,
             session_id=session_id,
             instruction=instruction,
+            on_event=on_event,
+            on_complete=on_complete,
         )
 
-        # Update message with job ID
-        await status_msg.edit_text(
-            f"*Job Started*\n\n"
-            f"📂 {project_name} / `{session_id}`\n"
-            f"🌿 Branch: `{session.branch}`\n"
-            f"🔹 Job: `{job.job_id}`\n\n"
-            f"📝 _{instr_display}_\n\n"
-            f"🔧 Running...\n\n"
-            f"Use `/summary {job.job_id}` to check progress.",
-            parse_mode="Markdown",
-        )
+        # Update tracker with actual job ID
+        if tracker_state:
+            tracker_state.job_id = job.job_id
+            await tracker_manager.set_status(job.job_id, "running")
+            # Re-register with correct job_id
+            tracker_manager._trackers[job.job_id] = tracker_state
+            tracker_manager._trackers.pop("pending", None)
 
         # Store job context
-        chat_state.store_message_context(
-            message_id=status_msg.message_id,
-            chat_id=chat_id,
-            session_id=session_id,
-            project_id=session.project_id,
-            job_id=job.job_id,
-            message_type="job",
-        )
+        if tracker_state and tracker_state.message_id:
+            chat_state.store_message_context(
+                message_id=tracker_state.message_id,
+                chat_id=chat_id,
+                session_id=session_id,
+                project_id=session.project_id,
+                job_id=job.job_id,
+                message_type="job",
+            )
 
     except ValueError as e:
-        await status_msg.edit_text(
+        # Add error reaction
+        await add_reaction(context, chat_id, message_id, "❌")
+        await update.message.reply_text(
             f"*Job Failed to Start*\n\nError: {e}",
             parse_mode="Markdown",
         )
+        # Clean up pending tracker if it was created
+        if tracker_manager:
+            tracker_manager.remove_tracker("pending")
 
 
 async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1906,24 +2289,32 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     icon = _job_status_icon(JobStatus(summary["status"]))
 
+    # Escape instruction for Markdown
+    instr = escape_markdown(summary['instruction'][:200])
+    if len(summary['instruction']) > 200:
+        instr += "..."
+
     text = "*Job Summary*\n\n"
     text += f"{icon} `{summary['job_id']}` - {summary['status']}\n"
     text += f"📂 {summary['project_id']} / `{summary['session_id']}`\n\n"
-    text += f"*Instruction:*\n_{summary['instruction'][:200]}_\n\n"
+    text += f"*Instruction:*\n{instr}\n\n"
 
     if summary.get("result_summary"):
-        text += f"*Result:*\n{summary['result_summary'][:300]}\n\n"
+        result = escape_markdown(summary['result_summary'][:300])
+        text += f"*Result:*\n{result}\n\n"
 
     if summary.get("files_changed"):
         text += f"*Files Changed:* {len(summary['files_changed'])}\n"
         for f in summary["files_changed"][:5]:
             text += f"  • `{f}`\n"
         if len(summary["files_changed"]) > 5:
-            text += f"  _...and {len(summary['files_changed']) - 5} more_\n"
+            remaining = len(summary['files_changed']) - 5
+            text += f"  ...and {remaining} more\n"
         text += "\n"
 
     if summary.get("error"):
-        text += f"*Error:*\n`{summary['error'][:200]}`\n\n"
+        err = escape_markdown(summary['error'][:200])
+        text += f"*Error:*\n{err}\n\n"
 
     # Timing info
     if summary.get("started_at"):
@@ -2331,14 +2722,15 @@ async def _get_agno_model(
 
     if model_id and provider:
         # Convert to agno format
-        if provider == "gemini":
-            return f"google:{model_id}"
-        elif provider == "openrouter":
-            return f"openrouter:{model_id}"
-        elif provider == "groq":
-            return f"groq:{model_id}"
-        elif provider == "cerebras":
-            return f"cerebras:{model_id}"
+        provider_prefixes = {
+            "gemini": "google",
+            "openrouter": "openrouter",
+            "groq": "groq",
+            "cerebras": "cerebras",
+        }
+        prefix = provider_prefixes.get(provider)
+        if prefix:
+            return f"{prefix}:{model_id}"
 
     # Fall back to defaults based on available keys
     # Prefer Cerebras (fastest), then Groq, then OpenRouter, then Gemini
@@ -2417,8 +2809,19 @@ async def _process_with_agent(
         settings=settings,
     )
 
+    # Show typing indicator and "thinking" reaction while AI processes
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    message_id = update.effective_message.message_id
+    await add_reaction(context, chat_id, message_id, "👀")
+
     # Chat with agent
     response = await agent.chat(text, chat_id)
+
+    # Update reaction based on result
+    if response.error:
+        await add_reaction(context, chat_id, message_id, "❌")
+    else:
+        await add_reaction(context, chat_id, message_id, "✅")
 
     # Handle errors
     if response.error:
@@ -2437,12 +2840,14 @@ async def _process_with_agent(
     # Check if there's a pending action needing confirmation
     if response.pending_action:
         action = response.pending_action
-        keyboard = InlineKeyboardMarkup([
+        keyboard = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("✅ Yes", callback_data="agent:confirm"),
-                InlineKeyboardButton("❌ No", callback_data="agent:deny"),
+                [
+                    InlineKeyboardButton("✅ Yes", callback_data="agent:confirm"),
+                    InlineKeyboardButton("❌ No", callback_data="agent:deny"),
+                ]
             ]
-        ])
+        )
 
         # Show agent's message with confirmation buttons
         msg = response.message
@@ -2458,7 +2863,32 @@ async def _process_with_agent(
         )
         return
 
-    # No pending action - just show the response
+    # Check if there are choices (MCQ buttons)
+    if response.choices:
+        # Build inline keyboard with choices
+        buttons = []
+        for choice in response.choices:
+            # Callback data format: choice:value (truncated if needed)
+            cb_value = choice.value[:50] if len(choice.value) > 50 else choice.value
+            buttons.append(
+                InlineKeyboardButton(choice.label, callback_data=f"choice:{cb_value}")
+            )
+
+        # Arrange buttons in rows of 2
+        rows = []
+        for i in range(0, len(buttons), 2):
+            rows.append(buttons[i : i + 2])
+
+        keyboard = InlineKeyboardMarkup(rows)
+
+        await update.effective_message.reply_text(
+            response.message,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
+    # No pending action or choices - just show the response
     if response.message:
         await update.effective_message.reply_text(
             response.message,
@@ -2514,6 +2944,7 @@ async def agent_callback_handler(
         if "Session" in response.message and "created" in response.message:
             # Extract session ID from response (e.g., "Session S3 created")
             import re
+
             match = re.search(r"Session \*\*(\w+)\*\*", response.message)
             if match:
                 new_session_id = match.group(1)
@@ -2525,6 +2956,63 @@ async def agent_callback_handler(
 
         with contextlib.suppress(BadRequest):
             await query.edit_message_text(f"❌ {response.message}")
+
+
+async def choice_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle choice button callbacks (MCQ selection).
+
+    Callback data format: choice:value
+    Sends the selected value back to the agent as a new message.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("choice:"):
+        return
+
+    chat_id = update.effective_chat.id
+    selected_value = data[7:]  # Remove "choice:" prefix
+
+    log.info("choice_selected", chat_id=chat_id, value=selected_value)
+
+    # Update the message to show selection
+    with contextlib.suppress(BadRequest):
+        original_text = query.message.text or ""
+        await query.edit_message_text(
+            f"{original_text}\n\n✅ Selected: **{selected_value}**",
+            parse_mode="Markdown",
+        )
+
+    # Send the selection back to the agent as a message
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    chat_state = get_chat_state(context)
+    model = await _get_agno_model(settings, chat_state, chat_id)
+
+    agent_db_path = settings.televibe_dir / "agent.db"
+    agent = get_agent(db=db, model=model, db_path=agent_db_path)
+    agent.set_chat_context(
+        chat_id,
+        active_session=chat_state.get_active_session(chat_id),
+        settings=settings,
+    )
+
+    # Show typing indicator while AI processes
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    # Chat with agent using the selected value
+    response = await agent.chat(selected_value, chat_id)
+
+    # Send the response
+    if response.message:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=response.message,
+            parse_mode="Markdown",
+        )
 
 
 async def _run_as_instruction(
@@ -2543,9 +3031,12 @@ async def _run_as_instruction(
     """
     import asyncio
 
+    from televibecode.tracker import get_preset
+
     db = get_db(context)
     settings = get_settings(context)
     chat_state = get_chat_state(context)
+    tracker_manager = get_tracker_manager(context)
     chat_id = update.effective_chat.id
 
     # Helper for sending messages (works in both message and callback contexts)
@@ -2569,38 +3060,79 @@ async def _run_as_instruction(
     # Show typing while starting
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    try:
-        job = await run_instruction(db, settings, session_id, instruction)
+    # Get project name
+    project = await db.get_project(session.project_id)
+    project_name = project.name if project else session.project_id
 
-        # Send confirmation
-        truncated = instruction[:60] + "..." if len(instruction) > 60 else instruction
-        msg = await send(
-            f"🔧 *Job Started*\n\n"
-            f"🔹 Job: `{job.job_id}`\n"
-            f"📂 Session: `{session_id}`\n"
-            f"📝 _{truncated}_\n\n"
-            f"Use /status to monitor progress or /tail to see logs."
+    # Load tracker config for this chat
+    if tracker_manager:
+        preset_name, config_overrides = await db.get_tracker_config(chat_id)
+        base_config = get_preset(preset_name)
+        for key, value in config_overrides.items():
+            if hasattr(base_config, key):
+                setattr(base_config, key, value)
+        tracker_manager.set_chat_config(chat_id, base_config)
+
+    try:
+        # Create tracker message
+        tracker_state = None
+        if tracker_manager:
+            tracker_state = await tracker_manager.create_tracker(
+                chat_id=chat_id,
+                job_id="pending",
+                session_id=session_id,
+                project_name=project_name,
+                instruction=instruction,
+            )
+
+        # Define callbacks for the executor
+        def on_event(job_id: str, event):
+            if tracker_manager and tracker_state:
+                asyncio.create_task(tracker_manager.add_event(job_id, event))
+
+        def on_complete(completed_job):
+            if tracker_manager and tracker_state:
+                status = "done" if completed_job.status.value == "done" else "failed"
+                if completed_job.status.value == "cancelled":
+                    status = "cancelled"
+                asyncio.create_task(
+                    tracker_manager.complete_tracker(
+                        job_id=completed_job.job_id,
+                        status=status,
+                        result=completed_job.result_summary,
+                        error=completed_job.error,
+                        files_changed=completed_job.files_changed,
+                    )
+                )
+
+        job = await run_instruction(
+            db, settings, session_id, instruction,
+            on_event=on_event,
+            on_complete=on_complete,
         )
+
+        # Update tracker with actual job ID
+        if tracker_state:
+            tracker_state.job_id = job.job_id
+            await tracker_manager.set_status(job.job_id, "running")
+            tracker_manager._trackers[job.job_id] = tracker_state
+            tracker_manager._trackers.pop("pending", None)
 
         # Store message context for reply routing
-        chat_state.store_message_context(
-            message_id=msg.message_id,
-            chat_id=chat_id,
-            session_id=session_id,
-            project_id=session.project_id,
-            job_id=job.job_id,
-            message_type="job",
-        )
-
-        # Start background task to monitor job completion
-        asyncio.create_task(
-            _monitor_job_completion(
-                context.bot, db, chat_id, job.job_id, session_id, msg.message_id
+        if tracker_state and tracker_state.message_id:
+            chat_state.store_message_context(
+                message_id=tracker_state.message_id,
+                chat_id=chat_id,
+                session_id=session_id,
+                project_id=session.project_id,
+                job_id=job.job_id,
+                message_type="job",
             )
-        )
 
     except ValueError as e:
         await send(f"Error: {e}", parse_mode=None)
+        if tracker_manager:
+            tracker_manager.remove_tracker("pending")
 
 
 async def _monitor_job_completion(
@@ -2904,7 +3436,15 @@ def _build_models_page(
 
     # Filter row (with tools filter)
     filter_row = []
-    filters = [("all", "All"), ("free", "🆓"), ("tools", "🔧"), ("gem", "💎"), ("or", "🌐"), ("groq", "⚡"), ("cere", "🧠")]
+    filters = [
+        ("all", "All"),
+        ("free", "🆓"),
+        ("tools", "🔧"),
+        ("gem", "💎"),
+        ("or", "🌐"),
+        ("groq", "⚡"),
+        ("cere", "🧠"),
+    ]
     for f_key, f_label in filters:
         label = f"[{f_label}]" if f_key == filter_type else f_label
         filter_row.append(InlineKeyboardButton(label, callback_data=f"m:f:{f_key}"))
@@ -3331,6 +3871,280 @@ async def model_callback_handler(
 
 
 # =============================================================================
+# Tracker Configuration Commands
+# =============================================================================
+
+
+async def tracker_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /tracker command - configure job tracker display.
+
+    Usage:
+        /tracker              - Show current config with buttons
+        /tracker <preset>     - Set preset (minimal, normal, verbose, debug)
+        /tracker show <item>  - Enable showing an item
+        /tracker hide <item>  - Disable showing an item
+    """
+    from televibecode.tracker import (
+        DISPLAY_MODES,
+        TOGGLEABLE_SETTINGS,
+        get_preset,
+        list_presets,
+    )
+
+    db = get_db(context)
+    chat_id = update.effective_chat.id
+    args = context.args or []
+
+    # Get current config
+    preset_name, overrides = await db.get_tracker_config(chat_id)
+    current_config = get_preset(preset_name)
+
+    # Apply overrides
+    for key, value in overrides.items():
+        if hasattr(current_config, key):
+            setattr(current_config, key, value)
+
+    if not args:
+        # Show current config with buttons
+        text = _format_tracker_config(preset_name, current_config)
+        keyboard = _build_tracker_keyboard(preset_name, current_config)
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
+    cmd = args[0].lower()
+
+    # Handle preset change
+    if cmd in list_presets():
+        await db.set_tracker_preset(chat_id, cmd)
+        new_config = get_preset(cmd)
+        text = f"✅ Tracker preset set to *{cmd}*\n\n"
+        text += _format_tracker_config(cmd, new_config)
+        keyboard = _build_tracker_keyboard(cmd, new_config)
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
+    # Handle show/hide
+    if cmd in ("show", "hide") and len(args) >= 2:
+        item = args[1].lower()
+        setting_key = TOGGLEABLE_SETTINGS.get(item)
+
+        if not setting_key:
+            items = ", ".join(TOGGLEABLE_SETTINGS.keys())
+            await update.message.reply_text(
+                f"Unknown item: `{item}`\n\n"
+                f"Available items: {items}",
+                parse_mode="Markdown",
+            )
+            return
+
+        value = cmd == "show"
+        await db.update_tracker_config(chat_id, setting_key, value)
+
+        status = "enabled" if value else "disabled"
+        await update.message.reply_text(
+            f"✅ `{item}` is now *{status}*",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Handle display mode
+    if cmd == "mode" and len(args) >= 2:
+        mode = args[1].lower()
+        if mode not in DISPLAY_MODES:
+            await update.message.reply_text(
+                f"Unknown mode: `{mode}`\n\n"
+                f"Available modes: {', '.join(DISPLAY_MODES)}",
+                parse_mode="Markdown",
+            )
+            return
+
+        await db.update_tracker_config(chat_id, "tool_display_mode", mode)
+        await update.message.reply_text(
+            f"✅ Display mode set to *{mode}*",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Unknown command
+    await update.message.reply_text(
+        "Usage:\n"
+        "`/tracker` - Show settings\n"
+        "`/tracker <preset>` - Set preset\n"
+        "`/tracker show <item>` - Enable item\n"
+        "`/tracker hide <item>` - Disable item\n\n"
+        f"Presets: {', '.join(list_presets())}\n"
+        f"Items: {', '.join(TOGGLEABLE_SETTINGS.keys())}",
+        parse_mode="Markdown",
+    )
+
+
+def _format_tracker_config(preset_name: str, config) -> str:
+    """Format tracker config for display."""
+    lines = [
+        "*Job Tracker Settings*",
+        f"Preset: `{preset_name}`",
+        "",
+        "*Event Display:*",
+        f"  AI Speech: {'✅' if config.show_ai_speech else '❌'}",
+        f"  AI Thinking: {'✅' if config.show_ai_thinking else '❌'}",
+        f"  Tool Start: {'✅' if config.show_tool_start else '❌'}",
+        f"  Tool Result: {'✅' if config.show_tool_result else '❌'}",
+        f"  Tool Errors: {'✅' if config.show_tool_errors else '❌'}",
+        f"  Approvals: {'✅' if config.show_approvals else '❌'}",
+        "",
+        "*Stats Display:*",
+        f"  Progress Bar: {'✅' if config.show_progress_bar else '❌'}",
+        f"  Time: {'✅' if config.show_elapsed_time else '❌'}",
+        f"  Files: {'✅' if config.show_file_count else '❌'}",
+        f"  Turns: {'✅' if config.show_turn_count else '❌'}",
+        f"  Tokens: {'✅' if config.show_token_count else '❌'}",
+        f"  Cost: {'✅' if config.show_cost else '❌'}",
+        "",
+        f"Display Mode: `{config.tool_display_mode}`",
+        f"Max Events: {config.max_events_displayed}",
+    ]
+    return "\n".join(lines)
+
+
+def _build_tracker_keyboard(preset_name: str, config) -> InlineKeyboardMarkup:
+    """Build inline keyboard for tracker config."""
+    from televibecode.tracker import list_presets
+
+    buttons = []
+
+    # Preset buttons (row 1)
+    preset_row = []
+    for p in list_presets()[:4]:  # First 4 presets
+        icon = "•" if p == preset_name else ""
+        preset_row.append(
+            InlineKeyboardButton(f"{icon}{p}", callback_data=f"trk:preset:{p}")
+        )
+    buttons.append(preset_row)
+
+    # Toggle buttons (quick toggles)
+    toggle_row1 = [
+        InlineKeyboardButton(
+            f"{'✅' if config.show_ai_speech else '❌'} AI",
+            callback_data="trk:toggle:show_ai_speech",
+        ),
+        InlineKeyboardButton(
+            f"{'✅' if config.show_tool_start else '❌'} Tools",
+            callback_data="trk:toggle:show_tool_start",
+        ),
+        InlineKeyboardButton(
+            f"{'✅' if config.show_tool_result else '❌'} Results",
+            callback_data="trk:toggle:show_tool_result",
+        ),
+    ]
+    buttons.append(toggle_row1)
+
+    toggle_row2 = [
+        InlineKeyboardButton(
+            f"{'✅' if config.show_cost else '❌'} Cost",
+            callback_data="trk:toggle:show_cost",
+        ),
+        InlineKeyboardButton(
+            f"{'✅' if config.show_token_count else '❌'} Tokens",
+            callback_data="trk:toggle:show_token_count",
+        ),
+        InlineKeyboardButton(
+            f"{'✅' if config.show_progress_bar else '❌'} Bar",
+            callback_data="trk:toggle:show_progress_bar",
+        ),
+    ]
+    buttons.append(toggle_row2)
+
+    # Display mode buttons
+    mode_row = [
+        InlineKeyboardButton(
+            f"{'•' if config.tool_display_mode == 'minimal' else ''}min",
+            callback_data="trk:mode:minimal",
+        ),
+        InlineKeyboardButton(
+            f"{'•' if config.tool_display_mode == 'normal' else ''}norm",
+            callback_data="trk:mode:normal",
+        ),
+        InlineKeyboardButton(
+            f"{'•' if config.tool_display_mode == 'detailed' else ''}detail",
+            callback_data="trk:mode:detailed",
+        ),
+    ]
+    buttons.append(mode_row)
+
+    return InlineKeyboardMarkup(buttons)
+
+
+async def tracker_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle tracker config button callbacks.
+
+    Callback formats:
+    - trk:preset:NAME - Set preset
+    - trk:toggle:KEY - Toggle a boolean setting
+    - trk:mode:MODE - Set display mode
+    """
+    from televibecode.tracker import get_preset
+
+    query = update.callback_query
+    await query.answer()
+
+    db = get_db(context)
+    chat_id = query.message.chat.id
+
+    data = query.data
+    parts = data.split(":")
+
+    if len(parts) < 3:
+        return
+
+    action = parts[1]
+    value = parts[2]
+
+    # Get current config
+    preset_name, overrides = await db.get_tracker_config(chat_id)
+    current_config = get_preset(preset_name)
+    for key, val in overrides.items():
+        if hasattr(current_config, key):
+            setattr(current_config, key, val)
+
+    if action == "preset":
+        await db.set_tracker_preset(chat_id, value)
+        preset_name = value
+        current_config = get_preset(value)
+
+    elif action == "toggle":
+        # Toggle the setting
+        current_value = getattr(current_config, value, False)
+        new_value = not current_value
+        await db.update_tracker_config(chat_id, value, new_value)
+        setattr(current_config, value, new_value)
+
+    elif action == "mode":
+        await db.update_tracker_config(chat_id, "tool_display_mode", value)
+        current_config.tool_display_mode = value
+
+    # Update message
+    text = _format_tracker_config(preset_name, current_config)
+    keyboard = _build_tracker_keyboard(preset_name, current_config)
+
+    with contextlib.suppress(BadRequest):
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+
+
+# =============================================================================
 # Voice Message Handler (Audio Transcription)
 # =============================================================================
 
@@ -3530,7 +4344,8 @@ async def _execute_command(
                         "failed": "❌",
                         "canceled": "⏹️",
                     }.get(j.status.value, "❓")
-                    lines.append(f"{status_emoji} `{j.job_id[:8]}` - {j.instruction[:30]}")
+                    instr = j.instruction[:30]
+                    lines.append(f"{status_emoji} `{j.job_id[:8]}` - {instr}")
                 await send("\n".join(lines), parse_mode="Markdown")
         return True
 
@@ -3926,3 +4741,75 @@ async def _process_with_suggestions(
     # No suggestions - show help message
     msg = result.message or "I'm not sure what you mean. Try /help to see commands."
     await update.effective_message.reply_text(msg)
+
+
+# =============================================================================
+# PRIVILEGED COMMANDS (Human-only, never seen by AI)
+# =============================================================================
+
+
+async def restart_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /restart - privileged command to restart TeleVibeCode.
+
+    This command is NEVER processed by the AI agent. It's handled
+    directly at the Telegram level for security.
+
+    The restart is graceful:
+    1. Saves state (which chats to notify)
+    2. Sends a "restarting" message
+    3. Exits cleanly (supervisor restarts us)
+    4. On restart, edits message to "back online"
+    """
+    chat_id = update.effective_chat.id
+    log.info("restart_command", chat_id=chat_id)
+
+    # Send notification message
+    msg = await update.message.reply_text(
+        "🔄 *Restarting TeleVibeCode...*\n\n"
+        "_This message will update when back online._",
+        parse_mode="Markdown",
+    )
+
+    # Get current git commit for tracking
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent.parent,
+        )
+        current_commit = result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        current_commit = "unknown"
+
+    # Save restart state
+    state_file = Path.home() / ".televibe" / "restart_state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        "restart_requested_at": __import__("datetime").datetime.now().isoformat(),
+        "reason": "user_command",
+        "triggered_by": str(chat_id),
+        "notify_chats": [chat_id],
+        "notify_message_ids": {str(chat_id): msg.message_id},
+        "last_working_commit": current_commit,
+        "attempt": 0,
+    }
+
+    state_file.write_text(json.dumps(state, indent=2))
+    log.info("restart_state_saved", state=state)
+
+    # Give Telegram time to send the message
+    import asyncio
+    import os
+
+    await asyncio.sleep(0.3)
+
+    # Exit immediately - supervisor will restart us
+    # Using os._exit() to avoid waiting for graceful shutdown
+    log.info("restart_exiting")
+    os._exit(0)

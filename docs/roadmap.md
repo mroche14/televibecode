@@ -4,12 +4,12 @@
 
 ```
 Phase 1: Foundation     →  Core orchestrator + basic Telegram        ✅ DONE
-Phase 2: Session Mgmt   →  Full session lifecycle + worktrees
+Phase 2: Session Mgmt   →  Full session lifecycle + worktrees        🟠 PARTIAL
 Phase 3: Task System    →  Backlog.md integration
-Phase 4: Job Execution  →  Claude Code runner + streaming
+Phase 4: Job Execution  →  Claude Code runner + streaming            🟠 PARTIAL
 Phase 5: Approvals      →  Gated actions + inline buttons
-Phase 6: Polish         →  Middle AI + natural language
-Phase 7: Hot-Reload     →  Separate receiver from logic + self-restart
+Phase 6: Polish         →  Middle AI + natural language              🟠 PARTIAL
+Phase 7: Self-Healing   →  Supervisor + auto-fix + /restart          ✅ DONE
 ```
 
 ---
@@ -479,106 +479,102 @@ dev = [
 
 ---
 
-## Phase 7: Hot-Reload Architecture
+## Phase 7: Hot-Reload & Self-Healing ✅
 
 ### Goals
-- Separate Telegram receiver from application logic
-- Enable code hot-reloading without losing Telegram connection
-- Self-restart capability when code changes are made
-- Zero-downtime deployments
+- Self-restart capability via `/restart` command
+- Self-healing when startup fails (Claude Code fixes issues automatically)
+- Supervisor process for monitoring and restart management
+- User notifications during healing process
 
-### Problem Statement
-Currently, when TeleVibeCode's code is modified (e.g., by Claude Code itself), the entire application must be manually restarted. This breaks the feedback loop when using TeleVibeCode to develop itself. We need an architecture that allows the "brain" (logic layer) to be restarted independently from the "ears" (Telegram receiver).
+### Implemented Architecture
 
-### Architecture Options
-
-#### Option A: FastAPI + WebSocket Bridge
 ```
-Telegram Bot (stable process)
-    ↓ WebSocket
-FastAPI Server (restartable with uvicorn --reload)
+Supervisor Process (stable, monitors health)
+    ↓ subprocess management
+TeleVibeCode Server (restartable)
     ↓
-Orchestrator MCP + Logic
+Telegram Bot + Orchestrator MCP + Logic
 ```
 
-#### Option B: Message Queue Architecture
-```
-Telegram Bot (stable listener)
-    ↓ Redis/ZMQ queue
-Worker Process (restartable)
-    ↓
-Orchestrator MCP + Logic
-```
-
-#### Option C: Unix Socket IPC
-```
-Telegram Bot (stable process)
-    ↓ Unix socket
-Logic Server (restartable)
-    ↓
-Orchestrator MCP + Logic
-```
+**Key Design Decisions:**
+- Simple supervisor pattern instead of complex message queues
+- Full process restart (fast enough at ~3 seconds)
+- Claude Code in `--dangerously-skip-permissions` mode for self-healing
+- Health flag file for startup verification
 
 ### Tasks
 
-#### 7.1 Architecture Selection
-- [ ] Evaluate options based on:
-  - Complexity vs benefit
-  - Latency requirements
-  - State management
-  - Development experience
-- [ ] Prototype preferred approach
-- [ ] Document decision
+#### 7.1 Supervisor Script ✅
+- [x] Create `supervisor.py` with process monitoring
+- [x] Health check via `~/.televibe/health.flag`
+- [x] Capture stdout/stderr while streaming to console
+- [x] Load `.env` for Telegram notifications
 
-#### 7.2 Receiver/Logic Separation
-- [ ] Extract Telegram polling into minimal stable process
-- [ ] Create message passing interface (WebSocket/queue/socket)
-- [ ] Move all logic processing to separate restartable service
-- [ ] Handle reconnection gracefully
+#### 7.2 Restart Command ✅
+- [x] `/restart` command (privileged, human-only)
+- [x] Save restart state with notify_chats
+- [x] Immediate exit with `os._exit(0)`
+- [x] Post-restart notification to user
 
-#### 7.3 Hot-Reload Support
-- [ ] Integrate with uvicorn `--reload` or similar
-- [ ] Watch for file changes in src/ directory
-- [ ] Automatic restart on code changes
-- [ ] Preserve Telegram connection during restart
+#### 7.3 Self-Healing ✅
+- [x] Detect startup failures (process exit code)
+- [x] Spawn Claude Code healer with error context
+- [x] Include previous logs for context (last 50 lines)
+- [x] Healer writes summary to `~/.televibe/heal_summary.txt`
+- [x] Send healing conclusion to Telegram
+- [x] Max 3 healing attempts before manual intervention
 
-#### 7.4 Self-Restart Capability
-- [ ] `/restart` command in Telegram
-- [ ] Graceful shutdown of logic layer
-- [ ] Automatic restart with new code
-- [ ] Health check after restart
-- [ ] Rollback on failed restart
+#### 7.4 Telegram Notifications ✅
+- [x] "🔄 Restarting TeleVibeCode..." on `/restart`
+- [x] "✅ TeleVibeCode is back online!" after successful restart
+- [x] "🔧 Failed to start, spawning Claude Code to fix..."
+- [x] "🔧 Claude applied a fix: [summary]" with conclusion
+- [x] "❌ Failed to heal after 3 attempts" with manual intervention notice
 
-#### 7.5 State Preservation
-- [ ] Persist in-flight jobs during restart
-- [ ] Resume job monitoring after restart
-- [ ] Maintain session context
-- [ ] Queue messages during restart window
+#### 7.5 CLI Integration ✅
+- [x] `televibecode supervised` command
+- [x] `--root` argument support
+- [x] Graceful signal handling (SIGINT, SIGTERM)
 
-### Deliverables
-- TeleVibeCode can modify its own code and apply changes
-- Zero-downtime code updates
-- `/restart` command for manual restarts
-- File watcher for automatic hot-reload
-- Preserved Telegram connection during restarts
+### Files Created/Modified
 
-### Technical Notes
+| File | Purpose |
+|------|---------|
+| `src/televibecode/supervisor.py` | Main supervisor process |
+| `src/televibecode/main.py` | Added `supervised` CLI command, health flag |
+| `src/televibecode/telegram/handlers.py` | `/restart` command handler |
+| `src/televibecode/telegram/bot.py` | Post-restart notification handling |
 
-**Why uvicorn?**
-- Built-in file watching and hot-reload
-- Production-ready ASGI server
-- Works well with async Python
-- Can run alongside MCP server
+### Usage
 
-**State Considerations:**
-- SQLite handles persistence (already async)
-- In-memory state must be minimal or serializable
-- Telegram bot token/connection stays in stable process
-- Job subprocess handles need careful handoff
+```bash
+# Run with self-healing supervisor (production)
+uv run televibecode supervised --root ~/projects/
 
-### Success Criteria
-- [ ] Can run `/restart` and logic restarts within 5 seconds
-- [ ] Telegram connection never drops during restart
-- [ ] File changes trigger automatic reload in dev mode
-- [ ] No lost messages during restart window
-- [ ] TeleVibeCode can successfully modify and reload itself
+# Run without supervisor (development)
+uv run televibecode serve --root ~/projects/
+```
+
+From Telegram:
+- `/restart` - Trigger a restart (human-only, AI never sees this)
+
+### How Self-Healing Works
+
+1. User sends `/restart` or supervisor detects startup failure
+2. Supervisor captures error output from failed process
+3. Claude Code spawned with error context + previous logs
+4. Claude analyzes error and fixes the code
+5. Claude creates `~/.televibe/healed.flag` and writes summary
+6. Supervisor sends summary to user via Telegram
+7. Supervisor restarts TeleVibeCode
+8. If successful, user gets "back online" notification
+9. If 3 failures, stops and requests manual intervention
+
+### Success Criteria ✅
+- [x] `/restart` restarts within ~3 seconds
+- [x] User notified of restart status via Telegram
+- [x] Self-healing fixes common startup errors
+- [x] Healing summary sent to user
+- [x] Max attempts prevents infinite loop
+- [x] TeleVibeCode can modify and heal itself

@@ -7,7 +7,6 @@ This agent can actually DO things, not just suggest commands.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -15,7 +14,12 @@ from typing import Any
 
 import structlog
 
+from televibecode.ai.mode_selector import (
+    format_mode_choice_prompt,
+    suggest_execution_mode,
+)
 from televibecode.db import Database
+from televibecode.db.models import ExecutionMode
 
 log = structlog.get_logger()
 
@@ -53,12 +57,21 @@ class PendingAction:
 
 
 @dataclass
+class AgentChoice:
+    """A choice option for MCQ-style questions."""
+
+    label: str  # Button text (short)
+    value: str  # Value to send back if selected
+
+
+@dataclass
 class AgentResponse:
     """Response from the conversational agent."""
 
     message: str  # Conversational response to show user
     pending_action: PendingAction | None = None  # Action needing confirmation
     error: str | None = None  # Error message if something went wrong
+    choices: list[AgentChoice] | None = None  # MCQ options for user to pick
 
 
 # Store pending actions per chat
@@ -140,14 +153,14 @@ class TeleVibeAgent:
 
     def _get_agent(self, chat_id: int) -> Agent:
         """Get or create agent for a chat."""
-        # Check if we need to recreate due to model change
-        cache_key = (chat_id, self.model)
-
         # Invalidate old agent if model changed
         if chat_id in self._agents:
             old_model = getattr(self._agents[chat_id], '_televibe_model', None)
             if old_model != self.model:
-                log.info("chat_agent_model_changed", chat_id=chat_id, old=old_model, new=self.model)
+                log.info(
+                    "chat_agent_model_changed",
+                    chat_id=chat_id, old=old_model, new=self.model,
+                )
                 del self._agents[chat_id]
 
         if chat_id not in self._agents:
@@ -188,6 +201,7 @@ class TeleVibeAgent:
         @tool(description="List all active coding sessions")
         async def list_sessions() -> str:
             """List active sessions."""
+            log.info("tool_call", tool="list_sessions", chat_id=chat_id)
             sessions = await db.get_active_sessions()
             if not sessions:
                 return "No active sessions. Use create_session to start one."
@@ -197,13 +211,15 @@ class TeleVibeAgent:
                 emoji = {"idle": "💤", "running": "🔄", "paused": "⏸️"}.get(
                     s.state.value, "❓"
                 )
-                lines.append(f"{emoji} {s.session_id} - {s.project_id} ({s.state.value})")
+                info = f"{emoji} {s.session_id} - {s.project_id} ({s.state.value})"
+                lines.append(info)
 
             return "Active sessions:\n" + "\n".join(lines)
 
         @tool(description="List all registered projects/repositories")
         async def list_projects() -> str:
             """List registered projects."""
+            log.info("tool_call", tool="list_projects", chat_id=chat_id)
             projects = await db.get_all_projects()
             if not projects:
                 return "No projects registered. Use scan_projects to find repositories."
@@ -323,40 +339,104 @@ class TeleVibeAgent:
 
             lines = []
             for a in approvals:
-                lines.append(f"⚠️ [{a.approval_id[:8]}] {a.approval_type.value}: {a.action_description[:40]}")
+                desc = a.action_description[:40]
+                line = f"⚠️ [{a.approval_id[:8]}] {a.approval_type.value}: {desc}"
+                lines.append(line)
 
             return "Pending approvals:\n" + "\n".join(lines)
 
         # ============== WRITE TOOLS (require confirmation) ==============
         # These return a special format that signals confirmation needed
+        # NOTE: Do NOT add confirm/confirmed parameters - confirmation happens via UI
 
-        @tool(description="Create a new coding session for a project. REQUIRES CONFIRMATION.")
-        async def create_session(project_id: str) -> str:
+        @tool(description=(
+            "Create a new coding session for a project. "
+            "Optionally specify mode: 'worktree' (default, isolated) or "
+            "'direct' (in project folder)."
+        ))
+        async def create_session(project_id: str, mode: str | None = None) -> str:
             """Request to create a new session.
 
             Args:
                 project_id: Project to create session for
+                mode: Optional execution mode - 'worktree' (default) or 'direct'
             """
+            log.info(
+                "tool_call", tool="create_session",
+                project_id=project_id, mode=mode, chat_id=chat_id,
+            )
             # Check project exists
             project = await db.get_project(project_id)
             if not project:
-                return f"Project '{project_id}' not found. Use list_projects to see available projects."
+                return (
+                    f"Project '{project_id}' not found. "
+                    "Use list_projects to see available projects."
+                )
+
+            # Determine execution mode
+            execution_mode = ExecutionMode.WORKTREE  # Default
+            mode_note = ""
+
+            if mode:
+                # User explicitly specified mode
+                if mode.lower() in ("direct", "d"):
+                    execution_mode = ExecutionMode.DIRECT
+                    mode_note = "\n📁 Mode: **direct** (running in project folder)"
+                elif mode.lower() in ("worktree", "wt", "w"):
+                    execution_mode = ExecutionMode.WORKTREE
+                    mode_note = "\n🌳 Mode: **worktree** (isolated branch)"
+                else:
+                    return (
+                        f"Unknown mode '{mode}'. Use 'worktree' (default, "
+                        "isolated) or 'direct' (project folder)."
+                    )
+            else:
+                # Auto-suggest mode based on conversation context
+                ctx = agent_self.get_chat_context(chat_id)
+                recent_message = ctx.get("last_message", "")
+                recommendation = suggest_execution_mode(recent_message)
+
+                if recommendation.confidence >= 0.75:
+                    # High confidence - auto-select
+                    execution_mode = recommendation.mode
+                    is_direct = execution_mode == ExecutionMode.DIRECT
+                    mode_icon = "📁" if is_direct else "🌳"
+                    reason = recommendation.reason
+                    mode_val = execution_mode.value
+                    mode_note = f"\n{mode_icon} Mode: **{mode_val}** ({reason})"
+                else:
+                    # Lower confidence - ask user to choose
+                    choice_prompt = format_mode_choice_prompt(recommendation)
+                    return (
+                        f"Creating session for **{project.name}**\n\n"
+                        f"{choice_prompt}\n\n"
+                        f"CHOICES:\n"
+                        f"- Worktree (safe): worktree\n"
+                        f"- Direct (fast): direct"
+                    )
 
             # Return confirmation request
+            exec_mode_val = execution_mode.value
             action = PendingAction(
-                action_id=f"create_session_{project_id}",
+                action_id=f"create_session_{project_id}_{exec_mode_val}",
                 action_type="create_session",
-                description=f"Create new session for {project_id}",
-                params={"project_id": project_id},
-                confirm_message=f"📂 Create new session for **{project.name}**?\n📁 Path: `{project.path}`",
+                description=f"Create new session for {project_id} ({exec_mode_val})",
+                params={"project_id": project_id, "execution_mode": exec_mode_val},
+                confirm_message=(
+                    f"📂 Create new session for **{project.name}**?\n"
+                    f"📁 Path: `{project.path}`{mode_note}"
+                ),
             )
             set_pending_action(chat_id, action)
 
-            return f"CONFIRM_NEEDED: Create new session for **{project.name}**?"
+            return f"CONFIRM_NEEDED: Create session for **{project.name}**?{mode_note}"
 
-        @tool(description="Close a coding session. REQUIRES CONFIRMATION.")
+        @tool(description=(
+            "Close a coding session. Call with session_id only - "
+            "user confirms via UI buttons."
+        ))
         async def close_session(session_id: str | None = None) -> str:
-            """Request to close a session.
+            """Request to close a session. No confirm parameter.
 
             Args:
                 session_id: Session to close (uses active if not provided)
@@ -380,24 +460,38 @@ class TeleVibeAgent:
                 action_type="close_session",
                 description=f"Close session {sid}",
                 params={"session_id": sid},
-                confirm_message=f"🗑️ Close session **{sid}**?\n📂 Project: **{project_name}**\n🌿 Branch: `{session.branch}`",
+                confirm_message=(
+                    f"🗑️ Close session **{sid}**?\n"
+                    f"📂 Project: **{project_name}**\n"
+                    f"🌿 Branch: `{session.branch}`"
+                ),
             )
             set_pending_action(chat_id, action)
 
             return f"CONFIRM_NEEDED: Close **{sid}** ({project_name})?"
 
-        @tool(description="Run a coding instruction in the current session. REQUIRES CONFIRMATION.")
+        @tool(description=(
+            "Run a coding instruction in the current session. "
+            "Call with instruction only - user confirms via UI buttons."
+        ))
         async def run_instruction(instruction: str) -> str:
-            """Request to run a coding instruction.
+            """Request to run a coding instruction. No confirm parameter.
 
             Args:
                 instruction: What to do (e.g., 'add unit tests', 'fix the login bug')
             """
+            log.info(
+                "tool_call", tool="run_instruction",
+                instruction=instruction[:50], chat_id=chat_id,
+            )
             ctx = agent_self.get_chat_context(chat_id)
             sid = ctx.get("active_session")
 
             if not sid:
-                return "No active session. Create or switch to a session first with /new or /use."
+                return (
+                    "No active session. Create or switch to a session first "
+                    "with /new or /use."
+                )
 
             session = await db.get_session(sid)
             if not session:
@@ -408,14 +502,20 @@ class TeleVibeAgent:
             project_name = project.name if project else session.project_id
 
             # Truncate for display
-            display = instruction[:100] + "..." if len(instruction) > 100 else instruction
+            if len(instruction) > 100:
+                display = instruction[:100] + "..."
+            else:
+                display = instruction
 
             action = PendingAction(
                 action_id=f"run_{sid}_{hash(instruction)}",
                 action_type="run_instruction",
                 description=f"Run: {display}",
                 params={"session_id": sid, "instruction": instruction},
-                confirm_message=f"📂 **{project_name}** / `{sid}`\n🌿 Branch: `{session.branch}`\n\n`{display}`",
+                confirm_message=(
+                    f"📂 **{project_name}** / `{sid}`\n"
+                    f"🌿 Branch: `{session.branch}`\n\n`{display}`"
+                ),
             )
             set_pending_action(chat_id, action)
 
@@ -445,18 +545,22 @@ class TeleVibeAgent:
             if job.status.value not in ("queued", "running"):
                 return f"Job {job.job_id[:8]} is already {job.status.value}."
 
+            instr = job.instruction[:50]
             action = PendingAction(
                 action_id=f"cancel_{job.job_id}",
                 action_type="cancel_job",
                 description=f"Cancel job: {job.instruction[:40]}",
                 params={"job_id": job.job_id},
-                confirm_message=f"Cancel job **{job.job_id[:8]}**?\n\n`{job.instruction[:50]}`",
+                confirm_message=f"Cancel job **{job.job_id[:8]}**?\n\n`{instr}`",
             )
             set_pending_action(chat_id, action)
 
             return f"CONFIRM_NEEDED: Cancel job {job.job_id[:8]}?"
 
-        @tool(description="Scan for new git repositories in the projects folder. REQUIRES CONFIRMATION.")
+        @tool(description=(
+            "Scan for new git repositories in the projects folder. "
+            "REQUIRES CONFIRMATION."
+        ))
         async def scan_projects() -> str:
             """Request to scan for projects."""
             action = PendingAction(
@@ -507,7 +611,9 @@ class TeleVibeAgent:
             # This is safe - just changes context, no confirmation needed
             agent_self.set_chat_context(chat_id, active_session=sid)
 
-            return f"Switched to session {sid} ({session.project_id}, branch: {session.branch})"
+            proj = session.project_id
+            branch = session.branch
+            return f"Switched to session {sid} ({proj}, branch: {branch})"
 
         return [
             list_sessions,
@@ -552,18 +658,57 @@ class TeleVibeAgent:
                 if session:
                     project = await self.db.get_project(session.project_id)
                     project_name = project.name if project else session.project_id
-                    context_note = f"\n[Context: session={active}, project={project_name}, branch={session.branch}]"
+                    branch = session.branch
+                    context_note = (
+                        f"\n[Context: session={active}, "
+                        f"project={project_name}, branch={branch}]"
+                    )
                 else:
                     context_note = f"\n[Context: session={active}]"
 
+            full_message = message + context_note
+
+            # Store last message for mode suggestion
+            self.set_chat_context(chat_id, last_message=message)
+
+            # Log incoming message
+            log.info(
+                "agent_chat_start",
+                chat_id=chat_id,
+                message=message[:100] + "..." if len(message) > 100 else message,
+                active_session=active,
+                model=self.model,
+            )
+
             # Run agent
-            response = await agent.arun(message + context_note)
+            response = await agent.arun(full_message)
+
+            # Log agent response details
+            resp_content = response.content
+            resp_len = len(resp_content) if resp_content else 0
+            if hasattr(response, "tool_calls"):
+                has_calls = bool(response.tool_calls)
+            else:
+                has_calls = False
+            if resp_content and len(resp_content) > 150:
+                preview = resp_content[:150] + "..."
+            else:
+                preview = resp_content
+            log.info(
+                "agent_chat_response",
+                chat_id=chat_id,
+                response_length=resp_len,
+                has_tool_calls=has_calls,
+                response_preview=preview,
+            )
 
             # Check if there's a pending action
             pending = get_pending_action(chat_id)
 
             # Clean up CONFIRM_NEEDED from response
             content = response.content
+            choices = None
+
             if "CONFIRM_NEEDED:" in content:
                 # Extract the conversational part before the confirmation
                 parts = content.split("CONFIRM_NEEDED:")
@@ -571,9 +716,43 @@ class TeleVibeAgent:
                 if not content:
                     content = "I'll need your confirmation for this."
 
+            # Parse CHOICES: format for MCQ buttons
+            # Format: CHOICES:\n- Label: value\n- Label2: value2
+            if "CHOICES:" in content:
+                parts = content.split("CHOICES:")
+                content = parts[0].strip()
+                choices_text = parts[1].strip() if len(parts) > 1 else ""
+
+                choices = []
+                for line in choices_text.split("\n"):
+                    line = line.strip()
+                    if line.startswith("- ") or line.startswith("• "):
+                        line = line[2:].strip()
+                    if not line:
+                        continue
+
+                    # Parse "Label: value" or just "Label" (value = label)
+                    if ":" in line:
+                        label, value = line.split(":", 1)
+                        choice = AgentChoice(
+                            label=label.strip(), value=value.strip()
+                        )
+                        choices.append(choice)
+                    else:
+                        choices.append(AgentChoice(label=line, value=line))
+
+                if not content:
+                    content = "Please choose:"
+
+                log.info(
+                    "agent_choices_parsed",
+                    chat_id=chat_id, num_choices=len(choices),
+                )
+
             return AgentResponse(
                 message=content,
                 pending_action=pending,
+                choices=choices if choices else None,
             )
 
         except Exception as e:
@@ -583,7 +762,7 @@ class TeleVibeAgent:
             error_str = str(e).lower()
             if "429" in str(e) or "rate" in error_str or "limit" in error_str:
                 return AgentResponse(
-                    message="I'm being rate limited. Try /model to switch to a different AI model.",
+                    message="Rate limited. Try /model to switch to a different AI.",
                     error="rate_limit",
                 )
 
@@ -609,13 +788,33 @@ class TeleVibeAgent:
         """
         action = clear_pending_action(chat_id)
         if not action:
+            log.warning("confirm_action_no_pending", chat_id=chat_id)
             return AgentResponse(message="Nothing to confirm.")
+
+        log.info(
+            "action_confirmed",
+            chat_id=chat_id,
+            action_type=action.action_type,
+            action_id=action.action_id,
+            params=action.params,
+        )
 
         try:
             result = await self._execute_action(action, chat_id)
+            log.info(
+                "action_executed",
+                chat_id=chat_id,
+                action_type=action.action_type,
+                result_preview=result[:100] + "..." if len(result) > 100 else result,
+            )
             return AgentResponse(message=result)
         except Exception as e:
-            log.error("action_execution_failed", error=str(e), action=action.action_type)
+            log.error(
+                "action_execution_failed",
+                chat_id=chat_id,
+                action_type=action.action_type,
+                error=str(e),
+            )
             return AgentResponse(
                 message=f"Failed to execute: {e}",
                 error="execution_error",
@@ -632,8 +831,15 @@ class TeleVibeAgent:
         """
         action = clear_pending_action(chat_id)
         if not action:
+            log.warning("deny_action_no_pending", chat_id=chat_id)
             return AgentResponse(message="Nothing to cancel.")
 
+        log.info(
+            "action_denied",
+            chat_id=chat_id,
+            action_type=action.action_type,
+            action_id=action.action_id,
+        )
         return AgentResponse(message=f"Cancelled: {action.description}")
 
     async def _execute_action(self, action: PendingAction, chat_id: int) -> str:
@@ -650,22 +856,29 @@ class TeleVibeAgent:
 
         if action.action_type == "create_session":
             project_id = action.params["project_id"]
+            execution_mode_str = action.params.get("execution_mode", "worktree")
+            execution_mode = ExecutionMode(execution_mode_str)
+
             # We need settings for workspace creation - get from context
             ctx = self.get_chat_context(chat_id)
             settings = ctx.get("settings")
             if not settings:
                 return "Missing settings context. Please try again."
 
-            result = await sessions.create_session(self.db, settings, project_id)
+            result = await sessions.create_session(
+                self.db, settings, project_id, execution_mode=execution_mode
+            )
             sid = result["session_id"]
 
             # Update active session
             self.set_chat_context(chat_id, active_session=sid)
 
+            mode_icon = "📁" if execution_mode == ExecutionMode.DIRECT else "🌳"
             return (
                 f"✅ Session **{sid}** created!\n\n"
                 f"📂 Project: {result['project_id']}\n"
                 f"🌿 Branch: {result['branch']}\n"
+                f"{mode_icon} Mode: {execution_mode.value}\n"
                 f"📁 {result['workspace_path']}\n\n"
                 f"Ready for instructions."
             )
@@ -715,10 +928,11 @@ class TeleVibeAgent:
                     session_id=session_id,
                 )
 
+                jid = job.job_id
                 return (
-                    f"🚀 Job **{job.job_id}** started in **{session_id}**!\n\n"
+                    f"🚀 Job **{jid}** started in **{session_id}**!\n\n"
                     f"📝 `{instruction[:80]}`\n\n"
-                    f"Use `/summary {job.job_id}` or `/tail {job.job_id}` to check progress."
+                    f"Use `/summary {jid}` or `/tail {jid}` to check progress."
                 )
 
             except ValueError as e:
@@ -781,6 +995,7 @@ class TeleVibeAgent:
 
 
 # System prompt for the agent
+# ruff: noqa: E501 - SYSTEM_PROMPT has documentation examples that exceed line length
 SYSTEM_PROMPT = """You are TeleVibe, a friendly AI assistant for TeleVibeCode.
 
 TeleVibeCode lets developers control Claude Code sessions from Telegram. You help them:
@@ -827,6 +1042,53 @@ You: "Hey! What are we working on today?"
 - Don't repeat yourself or over-explain
 - Be a helpful coding buddy, not a formal assistant
 - ALWAYS be explicit about which session/project will be affected
+
+## CRITICAL: Tool Call Rules
+- ONLY use the parameters defined in each tool - NEVER invent extra parameters
+- Do NOT add "confirm", "confirmed", "yes", or similar parameters - confirmation happens via UI buttons
+- Example: create_session(project_id="myapp") is correct
+- Example: create_session(project_id="myapp", confirm="yes") is WRONG - no confirm parameter exists
+- If a tool returns "CONFIRM_NEEDED", the user will see Yes/No buttons in Telegram
+
+## Multiple Choice Questions (MCQ)
+When you need to ask the user to choose from a list of options, format your response with CHOICES: at the end.
+This creates clickable buttons in Telegram so users can tap instead of typing.
+
+Format:
+```
+Your question or explanation here
+
+CHOICES:
+- Button Label: value_to_send
+- Another Option: another_value
+```
+
+Example asking which project:
+```
+Which project do you want to work on?
+
+CHOICES:
+- televibecode: televibecode
+- myapi: myapi
+- webapp: webapp
+```
+
+Example asking what to do:
+```
+What would you like to do with this session?
+
+CHOICES:
+- Run tests: run tests
+- Check status: status
+- Close it: close session
+```
+
+Rules:
+- Max 4 options (keep it simple for mobile)
+- Button labels should be short (1-3 words)
+- The value after the colon is what gets sent back if they click
+- User can still type a response instead of clicking
+- Only use CHOICES when there are clear distinct options
 """
 
 

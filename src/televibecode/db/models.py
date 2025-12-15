@@ -20,6 +20,13 @@ class SessionState(str, Enum):
     CLOSING = "closing"
 
 
+class ExecutionMode(str, Enum):
+    """Execution mode for sessions."""
+
+    WORKTREE = "worktree"  # Isolated git worktree (default, safe for features)
+    DIRECT = "direct"  # Run directly in project folder (quick fixes)
+
+
 class TaskStatus(str, Enum):
     """Task status enumeration."""
 
@@ -81,6 +88,7 @@ class Session(BaseModel):
     workspace_path: str
     branch: str
     state: SessionState = SessionState.IDLE
+    execution_mode: ExecutionMode = ExecutionMode.WORKTREE
     superclaude_profile: str | None = None
     mcp_profile: str | None = None
     attached_task_ids: list[str] = Field(default_factory=list)

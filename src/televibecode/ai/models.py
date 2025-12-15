@@ -436,9 +436,11 @@ class ModelRegistry:
                 if "distil" in model_lower and "whisper" in model_lower:
                     continue
                 # Skip models without tool support
-                if "compound" in model_lower:  # Groq compound models don't support tools
+                # Groq compound models don't support tools
+                if "compound" in model_lower:
                     continue
-                if "allam" in model_lower:  # Arabic language model without tool support
+                # Arabic language model without tool support
+                if "allam" in model_lower:
                     continue
 
                 # Get context length from API or default
@@ -458,6 +460,7 @@ class ModelRegistry:
                 # Create display name from ID
                 display_name = model_id.replace("-", " ").title()
 
+                # Assume all support tools, test will verify
                 models.append(
                     ModelInfo(
                         id=model_id,
@@ -466,7 +469,7 @@ class ModelRegistry:
                         context_length=context_length,
                         is_free=True,  # Groq has free tier
                         rank_score=rank_score,
-                        supports_tools=True,  # Assume all support tools, test will verify
+                        supports_tools=True,
                     )
                 )
 

@@ -1,5 +1,6 @@
 """Async SQLite database operations for TeleVibeCode."""
 
+import contextlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from televibecode.db.models import (
     Approval,
     ApprovalState,
     ApprovalType,
+    ExecutionMode,
     Job,
     JobStatus,
     Project,
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     workspace_path TEXT NOT NULL UNIQUE,
     branch TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'idle',
+    execution_mode TEXT NOT NULL DEFAULT 'worktree',
     superclaude_profile TEXT,
     mcp_profile TEXT,
     attached_task_ids TEXT DEFAULT '[]',
@@ -115,6 +118,8 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     ai_provider TEXT,
     active_session_id TEXT,
     notifications_enabled INTEGER DEFAULT 1,
+    tracker_preset TEXT DEFAULT 'normal',
+    tracker_config TEXT DEFAULT '{}',
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -157,11 +162,45 @@ class Database:
         await self._connection.executescript(SCHEMA)
         await self._connection.commit()
 
+        # Run migrations for existing databases
+        await self._run_migrations()
+
     async def close(self) -> None:
         """Close database connection."""
         if self._connection:
             await self._connection.close()
             self._connection = None
+
+    async def _run_migrations(self) -> None:
+        """Run database migrations for schema updates."""
+        # Add tracker columns to user_preferences if missing
+        try:
+            async with self.conn.execute(
+                "SELECT tracker_preset FROM user_preferences LIMIT 1"
+            ):
+                pass
+        except Exception:
+            # Column doesn't exist, add it
+            await self.conn.execute(
+                "ALTER TABLE user_preferences ADD COLUMN tracker_preset TEXT DEFAULT 'normal'"
+            )
+            await self.conn.execute(
+                "ALTER TABLE user_preferences ADD COLUMN tracker_config TEXT DEFAULT '{}'"
+            )
+            await self.conn.commit()
+
+        # Add execution_mode column to sessions if missing
+        try:
+            async with self.conn.execute(
+                "SELECT execution_mode FROM sessions LIMIT 1"
+            ):
+                pass
+        except Exception:
+            # Column doesn't exist, add it
+            await self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'worktree'"
+            )
+            await self.conn.commit()
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -283,10 +322,10 @@ class Database:
             """
             INSERT INTO sessions (
                 session_id, project_id, display_name, workspace_path, branch,
-                state, superclaude_profile, mcp_profile, attached_task_ids,
-                current_job_id, last_summary, last_diff, open_pr,
-                last_activity_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                state, execution_mode, superclaude_profile, mcp_profile,
+                attached_task_ids, current_job_id, last_summary, last_diff,
+                open_pr, last_activity_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session.session_id,
@@ -295,6 +334,7 @@ class Database:
                 session.workspace_path,
                 session.branch,
                 session.state.value,
+                session.execution_mode.value,
                 session.superclaude_profile,
                 session.mcp_profile,
                 json.dumps(session.attached_task_ids),
@@ -356,9 +396,9 @@ class Database:
             """
             UPDATE sessions SET
                 display_name = ?, workspace_path = ?, branch = ?, state = ?,
-                superclaude_profile = ?, mcp_profile = ?, attached_task_ids = ?,
-                current_job_id = ?, last_summary = ?, last_diff = ?, open_pr = ?,
-                last_activity_at = ?
+                execution_mode = ?, superclaude_profile = ?, mcp_profile = ?,
+                attached_task_ids = ?, current_job_id = ?, last_summary = ?,
+                last_diff = ?, open_pr = ?, last_activity_at = ?
             WHERE session_id = ?
             """,
             (
@@ -366,6 +406,7 @@ class Database:
                 session.workspace_path,
                 session.branch,
                 session.state.value,
+                session.execution_mode.value,
                 session.superclaude_profile,
                 session.mcp_profile,
                 json.dumps(session.attached_task_ids),
@@ -419,6 +460,7 @@ class Database:
             workspace_path=row["workspace_path"],
             branch=row["branch"],
             state=SessionState(row["state"]),
+            execution_mode=ExecutionMode(row["execution_mode"] or "worktree"),
             superclaude_profile=row["superclaude_profile"],
             mcp_profile=row["mcp_profile"],
             attached_task_ids=json.loads(row["attached_task_ids"] or "[]"),
@@ -871,12 +913,20 @@ class Database:
         ) as cursor:
             row = await cursor.fetchone()
             if row:
+                # Parse tracker_config JSON
+                tracker_config = {}
+                if row["tracker_config"]:
+                    with contextlib.suppress(json.JSONDecodeError):
+                        tracker_config = json.loads(row["tracker_config"])
+
                 return {
                     "chat_id": row["chat_id"],
                     "ai_model_id": row["ai_model_id"],
                     "ai_provider": row["ai_provider"],
                     "active_session_id": row["active_session_id"],
                     "notifications_enabled": bool(row["notifications_enabled"]),
+                    "tracker_preset": row["tracker_preset"] or "normal",
+                    "tracker_config": tracker_config,
                 }
             return None
 
@@ -945,5 +995,104 @@ class Database:
                 updated_at = excluded.updated_at
             """,
             (chat_id, 1 if enabled else 0, now),
+        )
+        await self.conn.commit()
+
+    async def get_tracker_config(
+        self, chat_id: int
+    ) -> tuple[str, dict[str, Any]]:
+        """Get tracker config for a chat.
+
+        Args:
+            chat_id: Telegram chat ID.
+
+        Returns:
+            Tuple of (preset_name, config_overrides).
+        """
+        async with self.conn.execute(
+            "SELECT tracker_preset, tracker_config FROM user_preferences WHERE chat_id = ?",
+            (chat_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                preset = row["tracker_preset"] or "normal"
+                config = {}
+                if row["tracker_config"]:
+                    with contextlib.suppress(json.JSONDecodeError):
+                        config = json.loads(row["tracker_config"])
+                return preset, config
+            return "normal", {}
+
+    async def set_tracker_preset(
+        self, chat_id: int, preset: str
+    ) -> None:
+        """Set tracker preset for a chat.
+
+        Args:
+            chat_id: Telegram chat ID.
+            preset: Preset name.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            INSERT INTO user_preferences (chat_id, tracker_preset, tracker_config, updated_at)
+            VALUES (?, ?, '{}', ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                tracker_preset = excluded.tracker_preset,
+                tracker_config = '{}',
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, preset, now),
+        )
+        await self.conn.commit()
+
+    async def update_tracker_config(
+        self, chat_id: int, key: str, value: Any
+    ) -> None:
+        """Update a single tracker config setting.
+
+        Args:
+            chat_id: Telegram chat ID.
+            key: Config key.
+            value: Config value.
+        """
+        # Get current config
+        _, current_config = await self.get_tracker_config(chat_id)
+        current_config[key] = value
+        config_json = json.dumps(current_config)
+
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            INSERT INTO user_preferences (chat_id, tracker_config, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                tracker_config = excluded.tracker_config,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, config_json, now),
+        )
+        await self.conn.commit()
+
+    async def set_tracker_config(
+        self, chat_id: int, config: dict[str, Any]
+    ) -> None:
+        """Set full tracker config for a chat.
+
+        Args:
+            chat_id: Telegram chat ID.
+            config: Full config dict.
+        """
+        config_json = json.dumps(config)
+        now = datetime.now(timezone.utc).isoformat()
+        await self.conn.execute(
+            """
+            INSERT INTO user_preferences (chat_id, tracker_config, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                tracker_config = excluded.tracker_config,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, config_json, now),
         )
         await self.conn.commit()

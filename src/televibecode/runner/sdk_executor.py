@@ -54,6 +54,14 @@ from televibecode.db import (
     Session,
     SessionState,
 )
+from televibecode.runner.context import get_enhanced_instruction
+from televibecode.tracker import (
+    AISpeechEvent,
+    SessionEvent,
+    SystemResultEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+)
 
 log = structlog.get_logger()
 
@@ -306,6 +314,8 @@ class SDKJobExecutor:
         db: Database,
         on_progress: Callable[[str, SDKJobProgress], None] | None = None,
         on_approval_needed: ApprovalCallback | None = None,
+        on_event: Callable[[str, SessionEvent], None] | None = None,
+        on_complete: Callable[[Job], None] | None = None,
     ):
         """Initialize the SDK executor.
 
@@ -314,6 +324,8 @@ class SDKJobExecutor:
             db: Database instance.
             on_progress: Optional callback for progress updates.
             on_approval_needed: Optional callback for approval requests.
+            on_event: Optional callback for tracker events.
+            on_complete: Optional callback when job completes.
         """
         if not SDK_AVAILABLE:
             raise RuntimeError(
@@ -325,6 +337,8 @@ class SDKJobExecutor:
         self.db = db
         self.on_progress = on_progress
         self.on_approval_needed = on_approval_needed
+        self.on_event = on_event
+        self.on_complete = on_complete
         self._running_clients: dict[str, ClaudeSDKClient] = {}
         self._job_progress: dict[str, SDKJobProgress] = {}
         self._pending_approvals: dict[str, asyncio.Event] = {}
@@ -722,6 +736,15 @@ class SDKJobExecutor:
                                     progress.message_count += 1
                                     progress.last_message = text[:100]
 
+                                    # Emit tracker event
+                                    if self.on_event:
+                                        event = AISpeechEvent(
+                                            session_id=job.session_id,
+                                            job_id=job.job_id,
+                                            text=text,
+                                        )
+                                        self.on_event(job.job_id, event)
+
                                     if log_file:
                                         log_file.write(f"[Assistant] {text}\n")
                                         log_file.flush()
@@ -729,6 +752,17 @@ class SDKJobExecutor:
                                 elif isinstance(block, ToolUseBlock):
                                     progress.tool_count += 1
                                     progress.current_tool = block.name
+
+                                    # Emit tracker event
+                                    if self.on_event:
+                                        event = ToolStartEvent(
+                                            session_id=job.session_id,
+                                            job_id=job.job_id,
+                                            tool_name=block.name,
+                                            tool_use_id=block.id or "",
+                                            tool_input=block.input or {},
+                                        )
+                                        self.on_event(job.job_id, event)
 
                                     if block.name in (
                                         "Write",
@@ -752,6 +786,22 @@ class SDKJobExecutor:
                                 elif isinstance(block, ToolResultBlock):
                                     progress.current_tool = None
 
+                                    # Emit tracker event
+                                    if self.on_event:
+                                        if block.content:
+                                            content = str(block.content)
+                                        else:
+                                            content = ""
+                                        is_err = getattr(block, 'is_error', False)
+                                        event = ToolResultEvent(
+                                            session_id=job.session_id,
+                                            job_id=job.job_id,
+                                            tool_use_id=block.tool_use_id or "",
+                                            result=content,
+                                            is_error=is_err,
+                                        )
+                                        self.on_event(job.job_id, event)
+
                                     if log_file:
                                         content = str(block.content)[:200]
                                         log_file.write(f"[ToolResult] {content}\n")
@@ -765,6 +815,22 @@ class SDKJobExecutor:
                                 log_file.flush()
 
                         elif isinstance(message, ResultMessage):
+                            # Emit result tracker event
+                            if self.on_event:
+                                subtype = "error" if message.is_error else "success"
+                                err_msg = message.result if message.is_error else None
+                                event = SystemResultEvent(
+                                    session_id=job.session_id,
+                                    job_id=job.job_id,
+                                    subtype=subtype,
+                                    is_error=message.is_error,
+                                    error_message=err_msg,
+                                    cost_usd=message.total_cost_usd,
+                                    num_turns=message.num_turns or 0,
+                                    duration_ms=int(progress.elapsed_seconds * 1000),
+                                )
+                                self.on_event(job.job_id, event)
+
                             # Final result
                             job.status = (
                                 JobStatus.FAILED if message.is_error else JobStatus.DONE
@@ -836,6 +902,10 @@ class SDKJobExecutor:
             executor="sdk",
         )
 
+        # Call completion callback
+        if self.on_complete:
+            self.on_complete(job)
+
         return job
 
     def get_job_progress(self, job_id: str) -> SDKJobProgress | None:
@@ -891,6 +961,8 @@ async def run_instruction_sdk(
     instruction: str,
     on_progress: Callable[[str, SDKJobProgress], None] | None = None,
     on_approval_needed: ApprovalCallback | None = None,
+    on_event: Callable[[str, SessionEvent], None] | None = None,
+    on_complete: Callable[[Job], None] | None = None,
 ) -> Job:
     """Run an instruction in a session using SDK executor.
 
@@ -901,6 +973,8 @@ async def run_instruction_sdk(
         instruction: Instruction for Claude Code.
         on_progress: Optional progress callback.
         on_approval_needed: Optional approval callback.
+        on_event: Optional callback for tracker events.
+        on_complete: Optional callback when job completes.
 
     Returns:
         Job object.
@@ -914,8 +988,19 @@ async def run_instruction_sdk(
             f"Session {session_id} already has a running job: {session.current_job_id}"
         )
 
-    executor = SDKJobExecutor(settings, db, on_progress, on_approval_needed)
-    job = await executor.run_job(session, instruction)
+    # Get project for context enhancement
+    project = await db.get_project(session.project_id)
+    if not project:
+        raise ValueError(f"Project '{session.project_id}' not found")
+
+    # Enhance instruction with session context
+    enhanced_instruction = get_enhanced_instruction(instruction, session, project)
+
+    executor = SDKJobExecutor(
+        settings, db, on_progress, on_approval_needed, on_event, on_complete
+    )
+    # Store original instruction in raw_input, use enhanced for execution
+    job = await executor.run_job(session, enhanced_instruction, raw_input=instruction)
 
     # Execute in background
     asyncio.create_task(executor.execute_job(job))

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import random
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -148,16 +147,20 @@ async def test_single_model(
         agent = Agent(
             model=model,
             tools=[add_numbers],
-            instructions="You are a helpful assistant. When asked to add numbers, you MUST use the add_numbers tool.",
+            instructions=(
+                "You are a helpful assistant. When asked to add numbers, "
+                "you MUST use the add_numbers tool."
+            ),
         )
 
         # Run test with timeout
         async def run_test() -> bool:
             nonlocal tool_actually_called
-            response = await asyncio.to_thread(
-                agent.run,
-                f"Use the add_numbers tool to calculate {num_a} + {num_b}. You must call the tool.",
+            prompt = (
+                f"Use the add_numbers tool to calculate {num_a} + {num_b}. "
+                "You must call the tool."
             )
+            response = await asyncio.to_thread(agent.run, prompt)
 
             # Primary check: tool was actually executed (most reliable)
             if tool_actually_called:
@@ -174,15 +177,16 @@ async def test_single_model(
                         return True
 
             # Last resort: correct answer with random numbers (unlikely to guess)
-            response_text = response.content if hasattr(response, 'content') else str(response)
-            if str(expected_result) in response_text:
-                return True
-
-            return False
+            if hasattr(response, 'content'):
+                response_text = response.content
+            else:
+                response_text = str(response)
+            return str(expected_result) in response_text
 
         supports_tools = await asyncio.wait_for(run_test(), timeout=30.0)
 
-        latency_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        latency_ms = int(elapsed * 1000)
 
         return ToolTestResult(
             model_id=model_id,
@@ -192,7 +196,7 @@ async def test_single_model(
             latency_ms=latency_ms,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return ToolTestResult(
             model_id=model_id,
             provider=provider.value,
@@ -202,15 +206,6 @@ async def test_single_model(
         )
     except Exception as e:
         error_msg = str(e)[:200]
-        # Check for specific errors that indicate no tool support
-        no_tool_errors = [
-            "tool use",
-            "function calling",
-            "tools not supported",
-            "does not support",
-        ]
-        supports = not any(err in error_msg.lower() for err in no_tool_errors)
-
         return ToolTestResult(
             model_id=model_id,
             provider=provider.value,

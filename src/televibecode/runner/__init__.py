@@ -47,6 +47,8 @@ async def run_instruction(
     instruction: str,
     on_progress=None,
     on_approval_needed=None,
+    on_event=None,
+    on_complete=None,
 ):
     """Run an instruction in a session.
 
@@ -60,6 +62,8 @@ async def run_instruction(
         instruction: Instruction for Claude Code.
         on_progress: Optional progress callback.
         on_approval_needed: Optional approval callback (SDK only).
+        on_event: Optional callback for tracker events.
+        on_complete: Optional callback when job completes.
 
     Returns:
         Job object.
@@ -72,6 +76,8 @@ async def run_instruction(
             instruction=instruction,
             on_progress=on_progress,
             on_approval_needed=on_approval_needed,
+            on_event=on_event,
+            on_complete=on_complete,
         )
     else:
         return await _run_instruction_subprocess(
@@ -80,6 +86,8 @@ async def run_instruction(
             session_id=session_id,
             instruction=instruction,
             on_progress=on_progress,
+            on_event=on_event,
+            on_complete=on_complete,
         )
 
 

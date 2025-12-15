@@ -120,12 +120,20 @@ Tool test results are cached in `~/.televibe/tool_test_results.json`.
 
 ## Core Entities
 
+> **📖 See [docs/data-models.md](docs/data-models.md#core-concepts-projects-sessions-branches-worktrees-and-jobs) for detailed entity relationships.**
+
 | Entity | ID Format | Description |
 |--------|-----------|-------------|
-| Project | UUID | Git repository registration |
-| Session | S1, S12 | Active Claude Code workspace |
+| Project | slug | Git repository (e.g., `my-web-app`) |
+| Session | project_timestamp | Git worktree + branch (e.g., `my-web-app_20241214_153042`) |
 | Task | T-123 | Backlog item from Backlog.md |
-| Job | UUID | Unit of work in a session |
+| Job | UUID | Single Claude Code execution in a session |
+
+**Critical relationships:**
+- **Project → Session**: 1:N (max 10 sessions per project)
+- **Session → Branch/Worktree**: 1:1 (each session has exactly one branch)
+- **Session → Job**: 1:N (jobs run sequentially, one at a time)
+- Sessions use **git worktrees** for isolation - changes in one session don't affect others
 
 ## Key Patterns
 
@@ -173,6 +181,27 @@ proc = await asyncio.create_subprocess_exec(
 4. **Approval gating**: Dangerous operations (shell, push, deploy) require approval
 5. **Structured logging**: Use structlog for all logging
 6. **Error handling**: Jobs should fail gracefully with clear error messages
+
+## Configuration Guidelines
+
+When adding new configurable settings:
+
+1. **Telegram-first configuration**: All user-facing config should be controllable via Telegram commands, not just environment variables. Users should be able to adjust settings without restarting the bot.
+
+2. **Database storage for preferences**: Per-chat settings should be stored in the `user_preferences` table using the appropriate columns. Use JSON for complex nested configs.
+
+3. **Default presets**: For multi-option configs (like tracker display), provide named presets (minimal, normal, verbose) that users can switch between easily.
+
+4. **Careful additions**: Before adding new config options:
+   - Consider if it's truly user-facing (needs Telegram UI) vs deployment-only (env var is fine)
+   - Ensure sensible defaults that work without configuration
+   - Document the option in the relevant Telegram command's help text
+   - Add database migration if extending user_preferences schema
+
+5. **Config locations**:
+   - **Environment variables (.env)**: API keys, security settings, deployment config
+   - **user_preferences table**: Per-chat preferences (model, tracker config, display settings)
+   - **TrackerConfig/presets**: Complex structured settings with sensible defaults
 
 ## SuperClaude Commands
 
